@@ -36,8 +36,8 @@ st.set_page_config(page_title="TrackMan Pitching Report", layout="wide", page_ic
 # ===========================================================================
 # CREDENTIALS & CONSTANTS
 # ===========================================================================
-CLIENT_ID     = "LongIslandUniversity-01"
-CLIENT_SECRET = "b272ec7f-2ea6-4040-92ea-673804d6fa46"
+CLIENT_ID = st.secrets["CLIENT_ID"]
+CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
 BASE_URL  = "https://dataapi.trackmanbaseball.com"
 TOKEN_URL = "https://login.trackman.com/connect/token"
 
@@ -786,4 +786,5 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
     elif "pitcher_names" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
 else:
+
     st.info("👈 Select a date range and click **Fetch Sessions** to get started")
