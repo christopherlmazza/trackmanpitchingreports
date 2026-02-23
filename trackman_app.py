@@ -672,10 +672,10 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
         st.text(f"  📅 {gi}")
 
     # Fetch all game data and find pitchers
-    if "pitcher_data" not in st.session_state or st.session_state.get("_team_key") != team_name:
+    if "pitcher_outings" not in st.session_state or st.session_state.get("_team_key") != team_name:
         with st.spinner("Loading game data and finding pitchers..."):
-            all_pitcher_names = []
-            game_dataframes = {}  # session_id -> (tdf, gdate, opp)
+            # pitcher_outings: { "Munn, Drew": [ (df, gdate, opp), (df, gdate2, opp2), ... ] }
+            pitcher_outings = {}
 
             for session in team_sessions:
                 sid = session["sessionId"]
@@ -722,34 +722,53 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                             .sort_values().index.tolist())
 
                 for pn in pitchers:
-                    label = f"{pn} ({gdate} vs {opp})"
-                    all_pitcher_names.append(label)
-                    game_dataframes[label] = (tdf[tdf["Pitcher"] == pn].copy().sort_values("PitchNo").reset_index(drop=True),
-                                              gdate, opp)
+                    p_df = tdf[tdf["Pitcher"] == pn].copy().sort_values("PitchNo").reset_index(drop=True)
+                    if pn not in pitcher_outings:
+                        pitcher_outings[pn] = []
+                    pitcher_outings[pn].append((p_df, gdate, opp))
 
-            st.session_state["pitcher_data"] = game_dataframes
-            st.session_state["pitcher_names"] = all_pitcher_names
+            # Sort outings by date within each pitcher
+            for pn in pitcher_outings:
+                pitcher_outings[pn].sort(key=lambda x: x[1])
+
+            st.session_state["pitcher_outings"] = pitcher_outings
+            st.session_state["pitcher_names"] = sorted(pitcher_outings.keys())
             st.session_state["_team_key"] = team_name
 
-    # Pitcher selection
+    # Pitcher selection — just unique names, each generates all outings
     if "pitcher_names" in st.session_state and st.session_state["pitcher_names"]:
         st.divider()
-        selected_pitchers = st.multiselect(
+
+        # Show outing counts next to names
+        outing_labels = []
+        for pn in st.session_state["pitcher_names"]:
+            n_outings = len(st.session_state["pitcher_outings"][pn])
+            if n_outings > 1:
+                outing_labels.append(f"{pn}  ({n_outings} outings)")
+            else:
+                gdate, opp = st.session_state["pitcher_outings"][pn][0][1], st.session_state["pitcher_outings"][pn][0][2]
+                outing_labels.append(f"{pn}  ({gdate} vs {opp})")
+
+        selected_labels = st.multiselect(
             "Select Pitcher(s) to Generate Reports",
-            st.session_state["pitcher_names"],
+            outing_labels,
             default=None
         )
 
-        if selected_pitchers and st.button("⚾ Generate Reports", type="primary", use_container_width=True):
+        # Map labels back to pitcher names
+        label_to_name = dict(zip(outing_labels, st.session_state["pitcher_names"]))
+        selected_names = [label_to_name[lbl] for lbl in selected_labels]
+
+        if selected_names and st.button("⚾ Generate Reports", type="primary", use_container_width=True):
             figures = []
             with st.spinner("Generating reports..."):
-                for label in selected_pitchers:
-                    p_data, gdate, opp = st.session_state["pitcher_data"][label]
-                    if len(p_data) == 0: continue
-                    pname = p_data["Pitcher"].iloc[0]
-                    fig = generate_pitcher_page(p_data, pname, gdate, opp)
-                    if fig:
-                        figures.append((label, fig))
+                for pname in selected_names:
+                    outings = st.session_state["pitcher_outings"][pname]
+                    for p_data, gdate, opp in outings:
+                        if len(p_data) == 0: continue
+                        fig = generate_pitcher_page(p_data, pname, gdate, opp)
+                        if fig:
+                            figures.append((f"{pname} ({gdate} vs {opp})", fig))
 
             if figures:
                 # Show preview
@@ -768,10 +787,8 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 pdf_buffer.seek(0)
 
                 # Generate filename
-                first_label = selected_pitchers[0]
-                _, gdate, opp = st.session_state["pitcher_data"][first_label]
                 safe_team = team_name.replace(" ", "")[:15]
-                fname = f"PitchingReport_{safe_team}_{gdate}.pdf"
+                fname = f"PitchingReport_{safe_team}_{date_from}_to_{date_to}.pdf"
 
                 st.download_button(
                     label="📥 Download PDF Report",
@@ -786,5 +803,5 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
     elif "pitcher_names" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
 else:
-
     st.info("👈 Select a date range and click **Fetch Sessions** to get started")
+
