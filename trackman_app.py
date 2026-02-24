@@ -1212,7 +1212,8 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
         if selected_names:
             # ========== TABS ==========
-            tab_reports, tab_summary, tab_heatmaps = st.tabs(["📄 Game Reports", "📊 Season Summary", "🔥 Heatmaps"])
+            tab_reports, tab_summary, tab_heatmaps, tab_debug = st.tabs(
+                ["📄 Game Reports", "📊 Season Summary", "🔥 Heatmaps", "🔧 Debug"])
 
             def load_full_pitcher_data(pitcher_names_to_load):
                 """Load full play+ball data for selected pitchers. Caches in session_state."""
@@ -1334,49 +1335,103 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 else:
                     hm_pitcher = st.selectbox("Select pitcher for heatmaps", selected_names, key="hm_pitcher")
 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    gen_rv = st.button("🔴 Run Value", type="primary", use_container_width=True, key="btn_rv")
-                with col2:
-                    gen_whiff = st.button("💨 Whiff Rate", type="primary", use_container_width=True, key="btn_whiff")
-                with col3:
-                    gen_xwoba = st.button("📈 xwOBA", type="primary", use_container_width=True, key="btn_xw")
+                # Load data button
+                if st.button("📂 Load Pitch Data", type="primary", use_container_width=True, key="btn_load_hm"):
+                    with st.spinner("Fetching pitch data..."):
+                        load_full_pitcher_data([hm_pitcher])
+                    st.session_state["_hm_loaded"] = hm_pitcher
 
-                for do_gen, metric, label in [(gen_rv, "run_value", "Run Value"),
-                                               (gen_whiff, "whiff", "Whiff Rate"),
-                                               (gen_xwoba, "xwoba", "xwOBA")]:
-                    if do_gen:
-                        with st.spinner(f"Fetching data & generating {label} heatmap..."):
-                            load_full_pitcher_data([hm_pitcher])
-                            if hm_pitcher not in st.session_state.get("pitcher_outings", {}):
-                                st.error("Could not load pitcher data"); continue
-                            all_outing_dfs = [p_df for p_df, _, _ in st.session_state["pitcher_outings"][hm_pitcher]]
-                            hm_data = pd.concat(all_outing_dfs, ignore_index=True) if all_outing_dfs else pd.DataFrame()
+                # Show controls if data is loaded
+                if (st.session_state.get("_hm_loaded") == hm_pitcher and
+                    hm_pitcher in st.session_state.get("pitcher_outings", {})):
 
-                            if hm_data.empty:
-                                st.warning("No pitch data available"); continue
+                    all_outing_dfs = [p_df for p_df, _, _ in st.session_state["pitcher_outings"][hm_pitcher]]
+                    hm_data = pd.concat(all_outing_dfs, ignore_index=True) if all_outing_dfs else pd.DataFrame()
 
-                            avail_types = hm_data["PitchType"].value_counts()
-                            avail_types = avail_types[avail_types >= 5].index.tolist()
-                            if not avail_types:
-                                st.warning("No pitch types with enough data"); continue
+                    if not hm_data.empty:
+                        avail_types = hm_data["PitchType"].value_counts()
+                        avail_types = avail_types[avail_types >= 5].index.tolist()
 
-                        # Pitch type selector (shown after data load)
-                        hm_pitch_type = st.selectbox("Select Pitch Type", avail_types, key=f"hm_pt_{metric}")
+                        if avail_types:
+                            hm_pitch_type = st.selectbox("Select Pitch Type", avail_types, key="hm_pt_select")
+                            hm_metric = st.selectbox("Select Metric", ["Run Value", "Whiff Rate", "xwOBA"], key="hm_metric_select")
 
-                        with st.spinner(f"Rendering {label}..."):
-                            fig = generate_heatmap(hm_data, hm_pitch_type, metric)
-                        if fig:
-                            st.pyplot(fig, use_container_width=True)
-                            buf = io.BytesIO()
-                            fig.savefig(buf, format="png", bbox_inches="tight", dpi=150, facecolor=BG_COLOR)
-                            buf.seek(0)
-                            st.download_button(f"📥 Download {label} Heatmap", data=buf,
-                                               file_name=f"Heatmap_{label}_{hm_pitcher}_{hm_pitch_type}.png",
-                                               mime="image/png", use_container_width=True)
-                            plt.close(fig)
+                            metric_map = {"Run Value": "run_value", "Whiff Rate": "whiff", "xwOBA": "xwoba"}
+
+                            if st.button("🔥 Generate Heatmap", type="primary", use_container_width=True, key="btn_gen_hm"):
+                                with st.spinner(f"Generating {hm_metric} heatmap..."):
+                                    fig = generate_heatmap(hm_data, hm_pitch_type, metric_map[hm_metric])
+                                if fig:
+                                    st.session_state["_hm_fig_bytes"] = None
+                                    buf = io.BytesIO()
+                                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150, facecolor=BG_COLOR)
+                                    buf.seek(0)
+                                    st.session_state["_hm_fig_bytes"] = buf.getvalue()
+                                    st.session_state["_hm_fig_label"] = f"{hm_metric}_{hm_pitcher}_{hm_pitch_type}"
+                                    st.pyplot(fig, use_container_width=True)
+                                    plt.close(fig)
+                                else:
+                                    st.warning(f"Not enough {hm_pitch_type} data for heatmap")
+
+                            # Persist download button across reruns
+                            if st.session_state.get("_hm_fig_bytes"):
+                                st.download_button(
+                                    f"📥 Download Heatmap",
+                                    data=st.session_state["_hm_fig_bytes"],
+                                    file_name=f"Heatmap_{st.session_state.get('_hm_fig_label', 'heatmap')}.png",
+                                    mime="image/png", use_container_width=True)
                         else:
-                            st.warning(f"Not enough data for {label} heatmap")
+                            st.warning("No pitch types with enough data for heatmaps (need 5+)")
+                    else:
+                        st.warning("No pitch data available")
+                elif st.session_state.get("_hm_loaded") and st.session_state.get("_hm_loaded") != hm_pitcher:
+                    st.info("Click **Load Pitch Data** to load data for this pitcher")
+
+            # ========== TAB 4: DEBUG ==========
+            with tab_debug:
+                st.caption("This tab shows raw PA-level data so you can verify IP/ER calculations. Remove this tab once stats are confirmed correct.")
+                if st.button("🔧 Load & Show Debug Data", type="primary", use_container_width=True, key="btn_debug"):
+                    with st.spinner("Loading data..."):
+                        load_full_pitcher_data(selected_names)
+
+                    for pname in selected_names:
+                        if pname not in st.session_state.get("pitcher_outings", {}):
+                            st.warning(f"No data for {pname}")
+                            continue
+                        st.subheader(f"🔍 {pname}")
+                        for p_df, gdate, opp in st.session_state["pitcher_outings"][pname]:
+                            st.write(f"**{gdate} vs {opp}** — {len(p_df)} pitches")
+
+                            # Show PA-by-PA breakdown
+                            pa_rows = []
+                            for (inn, pa_num), grp in p_df.groupby(["Inning", "PAofInning"]):
+                                last = grp.loc[grp["PitchNo"].idxmax()]
+                                pa_rows.append({
+                                    "Inn": inn,
+                                    "PA#": pa_num,
+                                    "Pitches": len(grp),
+                                    "Batter": last.get("Batter", ""),
+                                    "LastCall": last.get("PitchCall", ""),
+                                    "KorBB": last.get("KorBB", ""),
+                                    "PlayResult": last.get("PlayResult", ""),
+                                    "OutsOnPlay": last.get("OutsOnPlay", ""),
+                                    "RunsScored": last.get("RunsScored", ""),
+                                })
+                            pa_table = pd.DataFrame(pa_rows)
+                            st.dataframe(pa_table, use_container_width=True, hide_index=True)
+
+                            # Computed stats
+                            ip_s = calc_ip(p_df)
+                            er_s = calc_er(p_df)
+                            pa_s = calc_pa(p_df)
+                            k_s = int((p_df["KorBB"] == "Strikeout").sum())
+                            bb_s = int((p_df["KorBB"] == "Walk").sum())
+                            st.write(f"**Computed:** IP={ip_s}, ER={er_s}, PA={pa_s}, K={k_s}, BB={bb_s}")
+
+                            # Show raw OutsOnPlay and RunsScored distributions
+                            st.write("**Raw OutsOnPlay values in data:**", p_df["OutsOnPlay"].value_counts().to_dict())
+                            st.write("**Raw RunsScored values in data:**", p_df["RunsScored"].value_counts().to_dict())
+                            st.divider()
 
     elif "pitcher_names" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
