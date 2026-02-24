@@ -161,16 +161,27 @@ def calc_ip(pd_):
     for (_, _), grp in pd_.groupby(["Inning", "PAofInning"]):
         last = grp.loc[grp["PitchNo"].idxmax()]
         oop = last["OutsOnPlay"]
-        if pd.notna(oop) and oop > 0: total += int(oop)
-        elif last["KorBB"] == "Strikeout": total += 1
+        if pd.notna(oop) and oop > 0:
+            total += int(oop)
+        elif last["KorBB"] == "Strikeout":
+            # Only add 1 if OutsOnPlay didn't already capture it
+            total += 1
     return f"{total // 3}.{total % 3}"
 
 def calc_pa(pd_): return pd_.groupby(["Inning", "PAofInning"]).ngroups
 
 def calc_er(pd_):
-    d = int(pd_["RunsScored"].fillna(0).sum())
-    hm = int(((pd_["PlayResult"] == "HomeRun") & (pd_["RunsScored"].fillna(0) == 0)).sum())
-    return d + hm
+    """Count earned runs — only from the LAST pitch of each plate appearance to avoid double counting."""
+    total = 0
+    for (_, _), grp in pd_.groupby(["Inning", "PAofInning"]):
+        last = grp.loc[grp["PitchNo"].idxmax()]
+        rs = last["RunsScored"]
+        if pd.notna(rs) and rs > 0:
+            total += int(rs)
+        # Also count solo HR where RunsScored might be 0 due to data quirk
+        elif last["PlayResult"] == "HomeRun":
+            total += 1
+    return total
 
 def in_zone(s):
     return (s["PlateLocSide"].notna() & s["PlateLocHeight"].notna() &
@@ -637,7 +648,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ip_str = f"{ip_full}.{ip_rem}"
     ip_float = ip_full + ip_rem / 3.0
     era = (total_er / ip_float * 9) if ip_float > 0 else 0
-    whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0
+    whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0  # H includes HR
     k_pct = (total_k / total_pa * 100) if total_pa > 0 else 0
     bb_pct = (total_bb / total_pa * 100) if total_pa > 0 else 0
     fip = calc_fip(total_k, total_bb, total_hbp, total_hr, ip_str)
@@ -652,11 +663,11 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     izwp = round(iz_wh_ct / iz_sw * 100, 1) if iz_sw else 0
     pts = p["PitchType"].value_counts().index.tolist()
 
-    fig = plt.figure(figsize=(17, 13), facecolor=BG_COLOR)
-    gs = GridSpec(5, 4, figure=fig,
-                  height_ratios=[.06, .035, .30, .30, .30],
-                  width_ratios=[1, 1.2, 1.2, 1],
-                  hspace=.30, wspace=.25,
+    fig = plt.figure(figsize=(17, 11), facecolor=BG_COLOR)
+    gs = GridSpec(4, 3, figure=fig,
+                  height_ratios=[.06, .04, .38, .52],
+                  width_ratios=[1, 1.2, 1.2],
+                  hspace=.25, wspace=.25,
                   top=0.96, bottom=0.03, left=0.05, right=0.96)
 
     # ---- Row 0: Header ----
@@ -668,12 +679,21 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
 
     # ---- Row 1: Season stats banner ----
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
+
+    # Build per-outing detail string for debug
+    outing_details = []
+    for p_df, gdate, opp in outings:
+        o_ip = calc_ip(p_df)
+        o_er = calc_er(p_df)
+        outing_details.append(f"{gdate} vs {opp}: {o_ip}IP {o_er}ER")
+
     banner = (f"IP {ip_str}   ·   ERA {era:.2f}   ·   FIP {fip:.2f}   ·   WHIP {whip:.2f}   ·   "
               f"K% {k_pct:.1f}%   ·   BB% {bb_pct:.1f}%   ·   K-BB% {k_pct - bb_pct:.1f}%   ·   "
-              f"PA {total_pa}   ·   {len(outings)} outing(s)")
-    ax.text(.5, .7, banner, ha="center", va="center", fontsize=9, color=TEXT_COLOR, family="monospace")
-    ax.text(.5, .05, f"{date_from} to {date_to}", ha="center", va="center",
-            fontsize=8, color=MUTED_TEXT, family="monospace")
+              f"PA {total_pa}   ·   P {N}   ·   H {total_hits}   ·   HR {total_hr}   ·   "
+              f"K {total_k}   ·   BB {total_bb}   ·   {len(outings)} outing(s)")
+    ax.text(.5, .7, banner, ha="center", va="center", fontsize=8.5, color=TEXT_COLOR, family="monospace")
+    ax.text(.5, .2, f"{date_from} to {date_to}     |     " + "  /  ".join(outing_details),
+            ha="center", va="center", fontsize=6.5, color=MUTED_TEXT, family="monospace")
 
     # ---- Row 2, Col 0: Velocity Distribution ----
     ax_velo = fig.add_subplot(gs[2, 0]); ax_velo.set_facecolor(PANEL_COLOR)
@@ -722,8 +742,8 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ax_mov.tick_params(labelsize=6, colors=MUTED_TEXT)
     for sp in ax_mov.spines.values(): sp.set_color(GRID_COLOR)
 
-    # ---- Row 2, Col 2-3: Pitch Usage vs Batter Handedness ----
-    ax_usage = fig.add_subplot(gs[2, 2:]); ax_usage.set_facecolor(PANEL_COLOR)
+    # ---- Row 2, Col 2: Pitch Usage vs Batter Handedness ----
+    ax_usage = fig.add_subplot(gs[2, 2]); ax_usage.set_facecolor(PANEL_COLOR)
     lhb_data = p[p["BatterSide"] == "Left"]
     rhb_data = p[p["BatterSide"] == "Right"]
     lhb_total = len(lhb_data); rhb_total = len(rhb_data)
@@ -764,21 +784,8 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ax_usage.tick_params(labelsize=6, colors=MUTED_TEXT)
     for sp in ax_usage.spines.values(): sp.set_color(GRID_COLOR)
 
-    # ---- Row 3: Release Point ----
-    ax_rp = fig.add_subplot(gs[3, 0]); draw_release(ax_rp, p, pts)
-
-    # ---- Row 3, Col 1-3: placeholder for future or just empty ----
-    # Use the rest of row 3 for the zone plots (LHB / RHB aggregate)
-    lhb_all = p[p["BatterSide"] == "Left"]
-    rhb_all = p[p["BatterSide"] == "Right"]
-    ax_zl = fig.add_subplot(gs[3, 1]); draw_zone(ax_zl, lhb_all, f"vs LHB ({len(lhb_all)})", pts)
-    ax_zr = fig.add_subplot(gs[3, 2]); draw_zone(ax_zr, rhb_all, f"vs RHB ({len(rhb_all)})", pts)
-
-    # Row 3, Col 3: empty or movement legend
-    ax_empty = fig.add_subplot(gs[3, 3]); ax_empty.set_facecolor(BG_COLOR); ax_empty.axis("off")
-
-    # ---- Row 4: Table ----
-    ax_t = fig.add_subplot(gs[4, :]); ax_t.set_facecolor(BG_COLOR); ax_t.axis("off")
+    # ---- Row 3: Table ----
+    ax_t = fig.add_subplot(gs[3, :]); ax_t.set_facecolor(BG_COLOR); ax_t.axis("off")
     trows = []
     grade_cells = {}
     for ri, pt in enumerate(pts):
