@@ -36,8 +36,8 @@ st.set_page_config(page_title="TrackMan Pitching Report", layout="wide", page_ic
 # ===========================================================================
 # CREDENTIALS & CONSTANTS
 # ===========================================================================
-CLIENT_ID = st.secrets["CLIENT_ID"]
-CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
+CLIENT_ID     = "LongIslandUniversity-01"
+CLIENT_SECRET = "b272ec7f-2ea6-4040-92ea-673804d6fa46"
 BASE_URL  = "https://dataapi.trackmanbaseball.com"
 TOKEN_URL = "https://login.trackman.com/connect/token"
 
@@ -315,7 +315,7 @@ def get_headers():
     if not token: return None
     return {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json"}
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_sessions(date_from_str, date_to_str):
     headers = get_headers()
     if not headers: return []
@@ -324,7 +324,7 @@ def fetch_sessions(date_from_str, date_to_str):
     if resp.status_code != 200: return []
     return resp.json()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_game_data(session_id):
     headers = get_headers()
     if not headers: return [], []
@@ -618,20 +618,42 @@ with st.sidebar:
     date_from_str = f"{date_from}T00:00:00Z"
     date_to_str = f"{date_to + timedelta(days=1)}T00:00:00Z"
 
-    # Fetch sessions button
-    if st.button("🔍 Fetch Sessions", type="primary", use_container_width=True):
+    # Auto-fetch sessions when dates change
+    date_key = f"{date_from}_{date_to}"
+    if st.session_state.get("_date_key") != date_key:
         with st.spinner("Fetching sessions..."):
             sessions = fetch_sessions(date_from_str, date_to_str)
             if sessions:
                 st.session_state["sessions"] = sessions
                 st.session_state["teams"] = extract_teams_from_sessions(sessions)
+                st.session_state["_date_key"] = date_key
+                # Clear pitcher data since dates changed
+                st.session_state.pop("pitcher_outings", None)
+                st.session_state.pop("pitcher_names", None)
+                st.session_state.pop("_team_key", None)
                 st.success(f"Found {len(sessions)} session(s)")
             else:
                 st.error("No sessions found for this date range")
 
-    # Team dropdown
+    # Manual refresh button
+    if st.button("🔄 Refresh Sessions", use_container_width=True):
+        st.cache_data.clear()
+        st.session_state.pop("_date_key", None)
+        st.session_state.pop("pitcher_outings", None)
+        st.session_state.pop("pitcher_names", None)
+        st.session_state.pop("_team_key", None)
+        st.rerun()
+
+    # Team dropdown — persist selection
     if "teams" in st.session_state and st.session_state["teams"]:
-        selected_team = st.selectbox("Select Team", st.session_state["teams"])
+        teams_list = st.session_state["teams"]
+        # Restore previous selection if it still exists in the list
+        prev_team = st.session_state.get("selected_team", None)
+        if prev_team and prev_team in teams_list:
+            default_idx = teams_list.index(prev_team)
+        else:
+            default_idx = 0
+        selected_team = st.selectbox("Select Team", teams_list, index=default_idx, key="team_select")
 
         if selected_team:
             st.session_state["selected_team"] = selected_team
@@ -661,15 +683,30 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
     for s in team_sessions:
         ht = s.get("homeTeam", {}).get("name", "")
         at = s.get("awayTeam", {}).get("name", "")
-        gdl = s.get("gameDateLocal", s.get("gameDateUtc", ""))
-        try:
-            gd = datetime.fromisoformat(gdl.replace("Z", "")).date()
-        except:
-            gd = date_from
+        gd = None
+        for field in ["gameDateLocal", "gameDateUtc", "gameDate", "startDateTimeLocal", "startDateTimeUtc"]:
+            val = s.get(field, "")
+            if val and isinstance(val, str):
+                try:
+                    gd = datetime.fromisoformat(val.replace("Z", "").split("+")[0]).date()
+                    break
+                except:
+                    pass
+        if gd is None: gd = date_from
         game_info.append(f"{gd} — {ht} vs {at}")
 
     for gi in game_info:
         st.text(f"  📅 {gi}")
+
+    # Debug: show raw date fields from first session (remove after confirming dates work)
+    with st.expander("🔧 Debug: Raw session date fields (click to check)"):
+        s0 = team_sessions[0]
+        date_fields = {}
+        for k, v in s0.items():
+            kl = k.lower()
+            if "date" in kl or "time" in kl or "start" in kl:
+                date_fields[k] = v
+        st.json(date_fields)
 
     # Fetch all game data and find pitchers
     if "pitcher_outings" not in st.session_state or st.session_state.get("_team_key") != team_name:
@@ -688,14 +725,39 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 else:
                     opp = "Opponent"
 
-                gdl = session.get("gameDateLocal", session.get("gameDateUtc", ""))
-                try:
-                    gdate = datetime.fromisoformat(gdl.replace("Z", "")).date()
-                except:
-                    try:
-                        gdate = datetime.strptime(gdl[:10], "%Y-%m-%d").date()
-                    except:
-                        gdate = date_from
+                gdl = session.get("gameDateLocal", "") or session.get("gameDateUtc", "") or session.get("gameDate", "") or ""
+                gdate = None
+                # Try multiple date sources and formats
+                date_candidates = [gdl]
+                # Also check other possible fields
+                for field in ["startDateTimeLocal", "startDateTimeUtc", "sessionDate"]:
+                    val = session.get(field, "")
+                    if val: date_candidates.append(val)
+
+                for dc in date_candidates:
+                    if gdate: break
+                    if not dc or not isinstance(dc, str): continue
+                    for fmt_str in [None, "%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"]:
+                        try:
+                            if fmt_str is None:
+                                gdate = datetime.fromisoformat(dc.replace("Z", "").split("+")[0]).date()
+                            else:
+                                gdate = datetime.strptime(dc[:len(fmt_str.replace("%","x"))], fmt_str).date()
+                            break
+                        except:
+                            continue
+
+                if gdate is None:
+                    # Last resort: try to find any date-like string in session
+                    for k, v in session.items():
+                        if gdate: break
+                        if isinstance(v, str) and len(v) >= 10:
+                            try:
+                                gdate = datetime.fromisoformat(v.replace("Z", "").split("+")[0]).date()
+                            except:
+                                pass
+                if gdate is None:
+                    gdate = date_from  # absolute last fallback
 
                 plays_raw, balls_raw = fetch_game_data(sid)
                 if not plays_raw: continue
@@ -804,4 +866,5 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
 else:
     st.info("👈 Select a date range and click **Fetch Sessions** to get started")
+
 
