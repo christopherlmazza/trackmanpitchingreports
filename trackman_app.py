@@ -26,6 +26,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.stats import gaussian_kde
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta, datetime
 warnings.filterwarnings("ignore")
 
@@ -1155,52 +1156,59 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
     # Load pitcher NAMES only (lightweight — just plays, no balls)
     if "pitcher_outings_meta" not in st.session_state or st.session_state.get("_team_key") != team_name:
         with st.spinner("Finding pitchers..."):
-            pitcher_meta = {}  # {pitcher_name: [(session, gdate, opp), ...]}
-            for session in team_sessions:
-                sid = session["sessionId"]
-                ht = session.get("homeTeam", {}).get("name", "")
-                at = session.get("awayTeam", {}).get("name", "")
-                opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
-                gdate = parse_session_date(session, date_from)
+            pitcher_meta = {}
 
-                # Lightweight: only fetch plays (skip balls — much faster)
+            def fetch_plays_only(session):
+                """Fetch just plays for one session (no balls)."""
+                sid = session["sessionId"]
                 headers = get_headers()
-                if not headers: continue
+                if not headers: return None
                 try:
                     resp = requests.get(f"{BASE_URL}/api/v1/data/game/plays/{sid}", headers=headers)
-                    if resp.status_code != 200: continue
+                    if resp.status_code != 200: return None
                     plays_raw = resp.json()
-                    if not isinstance(plays_raw, list): continue
+                    if not isinstance(plays_raw, list): return None
+                    return (session, plays_raw)
                 except:
-                    continue
+                    return None
 
-                # Quick pitcher discovery from plays only
-                pitcher_teams = {}
-                for p in plays_raw:
-                    pname = sg(p, "pitcher", "name", default="")
-                    pteam = sg(p, "pitcher", "team", default="")
-                    tb = sg(p, "gameState", "topBottom", default="")
-                    if pname and pteam:
-                        pitcher_teams[pname] = (pteam, tb)
+            # Parallel fetch all sessions at once
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(fetch_plays_only, s): s for s in team_sessions}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is None: continue
+                    session, plays_raw = result
 
-                # Figure out which team code is ours
-                tc = None
-                if team_name.lower() in ht.lower():
-                    # Home team pitches in Top
+                    ht = session.get("homeTeam", {}).get("name", "")
+                    at = session.get("awayTeam", {}).get("name", "")
+                    opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
+                    gdate = parse_session_date(session, date_from)
+
+                    # Quick pitcher discovery from plays only
+                    pitcher_teams = {}
+                    for p in plays_raw:
+                        pname = sg(p, "pitcher", "name", default="")
+                        pteam = sg(p, "pitcher", "team", default="")
+                        tb = sg(p, "gameState", "topBottom", default="")
+                        if pname and pteam:
+                            pitcher_teams[pname] = (pteam, tb)
+
+                    tc = None
+                    if team_name.lower() in ht.lower():
+                        for pn, (pt, tb) in pitcher_teams.items():
+                            if tb == "Top": tc = pt; break
+                    elif team_name.lower() in at.lower():
+                        for pn, (pt, tb) in pitcher_teams.items():
+                            if tb == "Bottom": tc = pt; break
+
+                    if not tc: continue
+
                     for pn, (pt, tb) in pitcher_teams.items():
-                        if tb == "Top": tc = pt; break
-                elif team_name.lower() in at.lower():
-                    # Away team pitches in Bottom
-                    for pn, (pt, tb) in pitcher_teams.items():
-                        if tb == "Bottom": tc = pt; break
-
-                if not tc: continue
-
-                for pn, (pt, tb) in pitcher_teams.items():
-                    if pt == tc:
-                        if pn not in pitcher_meta:
-                            pitcher_meta[pn] = []
-                        pitcher_meta[pn].append((session, gdate, opp))
+                        if pt == tc:
+                            if pn not in pitcher_meta:
+                                pitcher_meta[pn] = []
+                            pitcher_meta[pn].append((session, gdate, opp))
 
             for pn in pitcher_meta:
                 pitcher_meta[pn].sort(key=lambda x: x[1])
@@ -1252,14 +1260,26 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         if sid not in sessions_to_fetch:
                             sessions_to_fetch[sid] = (session, gdate, opp)
 
-                # Fetch and process each session once
-                session_pitchers = {}  # sid -> {pitcher_name: dataframe}
-                for sid, (session, gdate, opp) in sessions_to_fetch.items():
+                # Parallel fetch all sessions
+                def fetch_one_session(sid_info):
+                    sid, (session, gdate, opp) = sid_info
+                    plays_raw, balls_raw = fetch_game_data(sid)
+                    if not plays_raw: return None
+                    return (sid, session, gdate, opp, plays_raw, balls_raw)
+
+                results = []
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = {executor.submit(fetch_one_session, item): item
+                               for item in sessions_to_fetch.items()}
+                    for future in as_completed(futures):
+                        r = future.result()
+                        if r: results.append(r)
+
+                # Process results
+                for sid, session, gdate, opp, plays_raw, balls_raw in results:
                     ht = session.get("homeTeam", {}).get("name", "")
                     at = session.get("awayTeam", {}).get("name", "")
 
-                    plays_raw, balls_raw = fetch_game_data(sid)
-                    if not plays_raw: continue
                     df = flatten_game(plays_raw, balls_raw)
                     if df.empty: continue
                     tc = identify_team_code(df, team_name, ht, at)
