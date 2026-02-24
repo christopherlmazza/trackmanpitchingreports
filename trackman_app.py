@@ -161,10 +161,12 @@ def calc_ip(pd_):
     for (_, _), grp in pd_.groupby(["Inning", "PAofInning"]):
         last = grp.loc[grp["PitchNo"].idxmax()]
         oop = last["OutsOnPlay"]
+        korbb = last.get("KorBB", "")
         if pd.notna(oop) and oop > 0:
             total += int(oop)
-        elif last["KorBB"] == "Strikeout":
-            # Only add 1 if OutsOnPlay didn't already capture it
+        elif pd.isna(oop) and korbb == "Strikeout":
+            # Only count strikeout as an out if OutsOnPlay is missing (NaN),
+            # NOT if it's explicitly 0 (which could mean dropped 3rd strike / runner reached)
             total += 1
     return f"{total // 3}.{total % 3}"
 
@@ -455,7 +457,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
     N = len(p)
     if N == 0: return None
 
-    ip = calc_ip(p); pa = calc_pa(p); er = calc_er(p)
+    ip = calc_ip(p); pa = calc_pa(p)
     hits = int(p["PlayResult"].isin(["Single", "Double", "Triple"]).sum())
     hr = int((p["PlayResult"] == "HomeRun").sum())
     k = int((p["KorBB"] == "Strikeout").sum())
@@ -493,7 +495,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
 
     # Stats bar
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
-    stats_str = (f"IP {ip}   ·   PA {pa}   ·   P {N}   ·   ER {er}   ·   "
+    stats_str = (f"IP {ip}   ·   PA {pa}   ·   P {N}   ·   "
                  f"H {hits}   ·   K {k}   ·   BB {bb}   ·   HBP {hbp}   ·   HR {hr}   ·   "
                  f"STR% {spct}%")
     ax.text(.5, .6, stats_str, ha="center", va="center", fontsize=9,
@@ -630,13 +632,12 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     if N == 0: return None
 
     # Season counting stats
-    total_ip_outs = 0; total_er = 0; total_k = 0; total_bb = 0
+    total_ip_outs = 0; total_k = 0; total_bb = 0
     total_hbp = 0; total_hr = 0; total_hits = 0; total_pa = 0
     for p_df, gdate, opp in outings:
         ip_s = calc_ip(p_df)
         parts = ip_s.split(".")
         total_ip_outs += int(parts[0]) * 3 + int(parts[1])
-        total_er += calc_er(p_df)
         total_k += int((p_df["KorBB"] == "Strikeout").sum())
         total_bb += int((p_df["KorBB"] == "Walk").sum())
         total_hbp += int((p_df["PitchCall"] == "HitByPitch").sum())
@@ -647,7 +648,6 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ip_full = total_ip_outs // 3; ip_rem = total_ip_outs % 3
     ip_str = f"{ip_full}.{ip_rem}"
     ip_float = ip_full + ip_rem / 3.0
-    era = (total_er / ip_float * 9) if ip_float > 0 else 0
     whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0  # H includes HR
     k_pct = (total_k / total_pa * 100) if total_pa > 0 else 0
     bb_pct = (total_bb / total_pa * 100) if total_pa > 0 else 0
@@ -680,16 +680,17 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     # ---- Row 1: Season stats banner ----
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
 
-    # Build per-outing detail string for debug
+    # Build per-outing detail string
     outing_details = []
     for p_df, gdate, opp in outings:
         o_ip = calc_ip(p_df)
-        o_er = calc_er(p_df)
-        outing_details.append(f"{gdate} vs {opp}: {o_ip}IP {o_er}ER")
+        o_k = int((p_df["KorBB"] == "Strikeout").sum())
+        o_bb = int((p_df["KorBB"] == "Walk").sum())
+        outing_details.append(f"{gdate} vs {opp}: {o_ip}IP {o_k}K {o_bb}BB")
 
-    banner = (f"IP {ip_str}   ·   ERA {era:.2f}   ·   FIP {fip:.2f}   ·   WHIP {whip:.2f}   ·   "
+    banner = (f"IP {ip_str}   ·   FIP {fip:.2f}   ·   WHIP {whip:.2f}   ·   "
               f"K% {k_pct:.1f}%   ·   BB% {bb_pct:.1f}%   ·   K-BB% {k_pct - bb_pct:.1f}%   ·   "
-              f"PA {total_pa}   ·   P {N}   ·   H {total_hits}   ·   HR {total_hr}   ·   "
+              f"PA {total_pa}   ·   P {N}   ·   H {total_hits + total_hr}   ·   HR {total_hr}   ·   "
               f"K {total_k}   ·   BB {total_bb}   ·   {len(outings)} outing(s)")
     ax.text(.5, .7, banner, ha="center", va="center", fontsize=8.5, color=TEXT_COLOR, family="monospace")
     ax.text(.5, .2, f"{date_from} to {date_to}     |     " + "  /  ".join(outing_details),
@@ -915,7 +916,14 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
         return None
 
     # Compute metric values per pitch
-    if metric == "run_value":
+    is_density_only = False
+    if metric == "location":
+        # Pure density heatmap — no per-pitch value needed
+        is_density_only = True
+        cmap_name = "YlOrRd"
+        title_label = "Pitch Location Density"
+        vmin, vmax = 0, 1  # will be normalized
+    elif metric == "run_value":
         sub["_val"] = sub.apply(compute_pitch_run_value, axis=1)
         cmap_name = "RdBu_r"  # red=bad for pitcher, blue=good
         title_label = "Run Value"
@@ -960,35 +968,41 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
         if len(side_data) >= 5:
             x = side_data["PlateLocSide"].values
             y = side_data["PlateLocHeight"].values
-            vals = side_data["_val"].values
 
             # Create grid
             xi = np.linspace(-2.5, 2.5, 80)
             yi = np.linspace(-0.5, 5.0, 80)
             Xi, Yi = np.meshgrid(xi, yi)
 
-            # KDE-weighted interpolation
             try:
                 positions = np.vstack([x, y])
                 kde = gaussian_kde(positions, bw_method=0.4)
                 density = kde(np.vstack([Xi.ravel(), Yi.ravel()])).reshape(Xi.shape)
 
-                # Weighted value surface
-                Zi = np.zeros_like(Xi)
-                for px, py, pv in zip(x, y, vals):
-                    dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
-                    weights = np.exp(-dist2 / (2 * 0.3 ** 2))
-                    Zi += weights * pv
-                weight_sum = np.zeros_like(Xi)
-                for px, py in zip(x, y):
-                    dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
-                    weight_sum += np.exp(-dist2 / (2 * 0.3 ** 2))
-                weight_sum[weight_sum == 0] = 1
-                Zi = Zi / weight_sum
+                if is_density_only:
+                    # Pure density — normalize to 0-1
+                    Zi = density / density.max() if density.max() > 0 else density
+                    density_thresh = 0.05
+                    Zi[Zi < density_thresh] = np.nan
+                else:
+                    vals = side_data["_val"].values
 
-                # Mask low-density areas
-                density_thresh = density.max() * 0.05
-                Zi[density < density_thresh] = np.nan
+                    # Weighted value surface
+                    Zi = np.zeros_like(Xi)
+                    for px, py, pv in zip(x, y, vals):
+                        dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
+                        weights = np.exp(-dist2 / (2 * 0.3 ** 2))
+                        Zi += weights * pv
+                    weight_sum = np.zeros_like(Xi)
+                    for px, py in zip(x, y):
+                        dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
+                        weight_sum += np.exp(-dist2 / (2 * 0.3 ** 2))
+                    weight_sum[weight_sum == 0] = 1
+                    Zi = Zi / weight_sum
+
+                    # Mask low-density areas
+                    density_thresh = density.max() * 0.05
+                    Zi[density < density_thresh] = np.nan
 
                 im = ax.pcolormesh(Xi, Yi, Zi, cmap=cmap_name, vmin=vmin, vmax=vmax,
                                    shading="gouraud", zorder=1)
@@ -1354,9 +1368,9 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
                         if avail_types:
                             hm_pitch_type = st.selectbox("Select Pitch Type", avail_types, key="hm_pt_select")
-                            hm_metric = st.selectbox("Select Metric", ["Run Value", "Whiff Rate", "xwOBA"], key="hm_metric_select")
+                            hm_metric = st.selectbox("Select Metric", ["Location", "Run Value", "Whiff Rate", "xwOBA"], key="hm_metric_select")
 
-                            metric_map = {"Run Value": "run_value", "Whiff Rate": "whiff", "xwOBA": "xwoba"}
+                            metric_map = {"Location": "location", "Run Value": "run_value", "Whiff Rate": "whiff", "xwOBA": "xwoba"}
 
                             if st.button("🔥 Generate Heatmap", type="primary", use_container_width=True, key="btn_gen_hm"):
                                 with st.spinner(f"Generating {hm_metric} heatmap..."):
@@ -1404,18 +1418,33 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
                             # Show PA-by-PA breakdown
                             pa_rows = []
+                            debug_outs = 0
                             for (inn, pa_num), grp in p_df.groupby(["Inning", "PAofInning"]):
                                 last = grp.loc[grp["PitchNo"].idxmax()]
+                                oop = last.get("OutsOnPlay", "")
+                                korbb = last.get("KorBB", "")
+                                # Replicate calc_ip logic to show which PAs count
+                                out_src = ""
+                                if pd.notna(oop) and float(oop) > 0:
+                                    debug_outs += int(float(oop))
+                                    out_src = f"+{int(float(oop))} (OutsOnPlay)"
+                                elif pd.isna(oop) and korbb == "Strikeout":
+                                    debug_outs += 1
+                                    out_src = "+1 (K, OOP=NaN)"
+                                elif korbb == "Strikeout":
+                                    out_src = f"K but OOP={oop} → NO out counted"
+
                                 pa_rows.append({
                                     "Inn": inn,
                                     "PA#": pa_num,
-                                    "Pitches": len(grp),
+                                    "#P": len(grp),
                                     "Batter": last.get("Batter", ""),
                                     "LastCall": last.get("PitchCall", ""),
-                                    "KorBB": last.get("KorBB", ""),
+                                    "KorBB": korbb,
                                     "PlayResult": last.get("PlayResult", ""),
-                                    "OutsOnPlay": last.get("OutsOnPlay", ""),
+                                    "OutsOnPlay": oop,
                                     "RunsScored": last.get("RunsScored", ""),
+                                    "OutCredit": out_src,
                                 })
                             pa_table = pd.DataFrame(pa_rows)
                             st.dataframe(pa_table, use_container_width=True, hide_index=True)
@@ -1426,7 +1455,7 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                             pa_s = calc_pa(p_df)
                             k_s = int((p_df["KorBB"] == "Strikeout").sum())
                             bb_s = int((p_df["KorBB"] == "Walk").sum())
-                            st.write(f"**Computed:** IP={ip_s}, ER={er_s}, PA={pa_s}, K={k_s}, BB={bb_s}")
+                            st.write(f"**Computed:** IP={ip_s}, ER={er_s}, PA={pa_s}, K={k_s}, BB={bb_s}, Debug outs total={debug_outs}")
 
                             # Show raw OutsOnPlay and RunsScored distributions
                             st.write("**Raw OutsOnPlay values in data:**", p_df["OutsOnPlay"].value_counts().to_dict())
