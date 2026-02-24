@@ -162,12 +162,18 @@ def calc_ip(pd_):
         last = grp.loc[grp["PitchNo"].idxmax()]
         oop = last["OutsOnPlay"]
         korbb = last.get("KorBB", "")
+        result = last.get("PlayResult", "")
+
         if pd.notna(oop) and oop > 0:
             total += int(oop)
-        elif pd.isna(oop) and korbb == "Strikeout":
-            # Only count strikeout as an out if OutsOnPlay is missing (NaN),
-            # NOT if it's explicitly 0 (which could mean dropped 3rd strike / runner reached)
-            total += 1
+        elif korbb == "Strikeout":
+            # Dropped 3rd strike: batter reaches — no out recorded
+            # If PlayResult indicates batter reached base, skip
+            reached = result in ("Single", "Double", "Triple", "HomeRun",
+                                 "Error", "FieldersChoice", "CaughtStealing",
+                                 "ReachedOnError")
+            if not reached:
+                total += 1
     return f"{total // 3}.{total % 3}"
 
 def calc_pa(pd_): return pd_.groupby(["Inning", "PAofInning"]).ngroups
@@ -496,7 +502,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
     # Stats bar
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
     stats_str = (f"IP {ip}   ·   PA {pa}   ·   P {N}   ·   "
-                 f"H {hits}   ·   K {k}   ·   BB {bb}   ·   HBP {hbp}   ·   HR {hr}   ·   "
+                 f"H {hits + hr}   ·   K {k}   ·   BB {bb}   ·   HBP {hbp}   ·   HR {hr}   ·   "
                  f"STR% {spct}%")
     ax.text(.5, .6, stats_str, ha="center", va="center", fontsize=9,
             color=TEXT_COLOR, family="monospace")
@@ -1419,20 +1425,24 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                             # Show PA-by-PA breakdown
                             pa_rows = []
                             debug_outs = 0
+                            reached_results = ("Single", "Double", "Triple", "HomeRun",
+                                               "Error", "FieldersChoice", "CaughtStealing",
+                                               "ReachedOnError")
                             for (inn, pa_num), grp in p_df.groupby(["Inning", "PAofInning"]):
                                 last = grp.loc[grp["PitchNo"].idxmax()]
                                 oop = last.get("OutsOnPlay", "")
                                 korbb = last.get("KorBB", "")
-                                # Replicate calc_ip logic to show which PAs count
+                                result = last.get("PlayResult", "")
                                 out_src = ""
                                 if pd.notna(oop) and float(oop) > 0:
                                     debug_outs += int(float(oop))
                                     out_src = f"+{int(float(oop))} (OutsOnPlay)"
-                                elif pd.isna(oop) and korbb == "Strikeout":
-                                    debug_outs += 1
-                                    out_src = "+1 (K, OOP=NaN)"
                                 elif korbb == "Strikeout":
-                                    out_src = f"K but OOP={oop} → NO out counted"
+                                    if result in reached_results:
+                                        out_src = f"K but reached ({result}) → NO out"
+                                    else:
+                                        debug_outs += 1
+                                        out_src = "+1 (K)"
 
                                 pa_rows.append({
                                     "Inn": inn,
@@ -1441,7 +1451,7 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                     "Batter": last.get("Batter", ""),
                                     "LastCall": last.get("PitchCall", ""),
                                     "KorBB": korbb,
-                                    "PlayResult": last.get("PlayResult", ""),
+                                    "PlayResult": result,
                                     "OutsOnPlay": oop,
                                     "RunsScored": last.get("RunsScored", ""),
                                     "OutCredit": out_src,
