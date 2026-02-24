@@ -25,6 +25,7 @@ from matplotlib.patches import Rectangle, Polygon
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from matplotlib.colors import LinearSegmentedColormap
+from scipy.stats import gaussian_kde
 from datetime import date, timedelta, datetime
 warnings.filterwarnings("ignore")
 
@@ -596,6 +597,448 @@ def generate_pitcher_page(p, pname, gdate, opp):
     return fig
 
 # ===========================================================================
+# SEASON SUMMARY FUNCTIONS
+# ===========================================================================
+def calc_fip(k, bb, hbp_ct, hr_ct, ip_str):
+    """FIP = (13*HR + 3*(BB+HBP) - 2*K) / IP + 3.10"""
+    parts = ip_str.split(".")
+    ip = int(parts[0]) + int(parts[1]) / 3 if len(parts) == 2 else float(ip_str)
+    if ip == 0: return 0.0
+    return (13 * hr_ct + 3 * (bb + hbp_ct) - 2 * k) / ip + 3.10
+
+def generate_season_summary(pitcher_name, outings, date_from, date_to):
+    """Generate a season summary figure for a pitcher across all outings."""
+    all_dfs = []
+    for p_df, gdate, opp in outings:
+        df_copy = p_df.copy()
+        df_copy["_game_date"] = gdate
+        df_copy["_opp"] = opp
+        all_dfs.append(df_copy)
+    p = pd.concat(all_dfs, ignore_index=True)
+    N = len(p)
+    if N == 0: return None
+
+    # Season counting stats
+    total_ip_outs = 0; total_er = 0; total_k = 0; total_bb = 0
+    total_hbp = 0; total_hr = 0; total_hits = 0; total_pa = 0
+    for p_df, gdate, opp in outings:
+        ip_s = calc_ip(p_df)
+        parts = ip_s.split(".")
+        total_ip_outs += int(parts[0]) * 3 + int(parts[1])
+        total_er += calc_er(p_df)
+        total_k += int((p_df["KorBB"] == "Strikeout").sum())
+        total_bb += int((p_df["KorBB"] == "Walk").sum())
+        total_hbp += int((p_df["PitchCall"] == "HitByPitch").sum())
+        total_hr += int((p_df["PlayResult"] == "HomeRun").sum())
+        total_hits += int(p_df["PlayResult"].isin(["Single", "Double", "Triple"]).sum())
+        total_pa += calc_pa(p_df)
+
+    ip_full = total_ip_outs // 3; ip_rem = total_ip_outs % 3
+    ip_str = f"{ip_full}.{ip_rem}"
+    ip_float = ip_full + ip_rem / 3.0
+    era = (total_er / ip_float * 9) if ip_float > 0 else 0
+    whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0
+    k_pct = (total_k / total_pa * 100) if total_pa > 0 else 0
+    bb_pct = (total_bb / total_pa * 100) if total_pa > 0 else 0
+    fip = calc_fip(total_k, total_bb, total_hbp, total_hr, ip_str)
+
+    wh = p["PitchCall"] == "StrikeSwinging"
+    sw = p["PitchCall"].isin(SWING_CALLS)
+    iz = p["InZone"]; ooz = ~iz
+    zpct = round(iz.sum() / N * 100, 1)
+    wpct = round(wh.sum() / sw.sum() * 100, 1) if sw.sum() else 0
+    cpct = round((sw & ooz).sum() / ooz.sum() * 100, 1) if ooz.sum() else 0
+    iz_sw = (sw & iz).sum(); iz_wh_ct = (wh & iz).sum()
+    izwp = round(iz_wh_ct / iz_sw * 100, 1) if iz_sw else 0
+    pts = p["PitchType"].value_counts().index.tolist()
+
+    fig = plt.figure(figsize=(17, 13), facecolor=BG_COLOR)
+    gs = GridSpec(5, 4, figure=fig,
+                  height_ratios=[.06, .035, .30, .30, .30],
+                  width_ratios=[1, 1.2, 1.2, 1],
+                  hspace=.30, wspace=.25,
+                  top=0.96, bottom=0.03, left=0.05, right=0.96)
+
+    # ---- Row 0: Header ----
+    ax = fig.add_subplot(gs[0, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
+    ax.text(.5, .7, pitcher_name.upper(), ha="center", va="center", fontsize=22,
+            fontweight="bold", color=TEXT_COLOR, family="monospace")
+    ax.text(.5, .1, "Season Pitching Summary", ha="center", va="center",
+            fontsize=12, color=ACCENT_COLOR, family="monospace")
+
+    # ---- Row 1: Season stats banner ----
+    ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
+    banner = (f"IP {ip_str}   ·   ERA {era:.2f}   ·   FIP {fip:.2f}   ·   WHIP {whip:.2f}   ·   "
+              f"K% {k_pct:.1f}%   ·   BB% {bb_pct:.1f}%   ·   K-BB% {k_pct - bb_pct:.1f}%   ·   "
+              f"PA {total_pa}   ·   {len(outings)} outing(s)")
+    ax.text(.5, .7, banner, ha="center", va="center", fontsize=9, color=TEXT_COLOR, family="monospace")
+    ax.text(.5, .05, f"{date_from} to {date_to}", ha="center", va="center",
+            fontsize=8, color=MUTED_TEXT, family="monospace")
+
+    # ---- Row 2, Col 0: Velocity Distribution ----
+    ax_velo = fig.add_subplot(gs[2, 0]); ax_velo.set_facecolor(PANEL_COLOR)
+    pt_velo_sorted = sorted(pts, key=lambda x: p[p["PitchType"] == x]["RelSpeed"].median()
+                            if not p[p["PitchType"] == x]["RelSpeed"].dropna().empty else 0, reverse=True)
+    for i, pt in enumerate(pt_velo_sorted):
+        velos = p.loc[p["PitchType"] == pt, "RelSpeed"].dropna()
+        if len(velos) < 3: continue
+        try:
+            kde = gaussian_kde(velos, bw_method=0.3)
+            x_range = np.linspace(velos.min() - 3, velos.max() + 3, 200)
+            density = kde(x_range)
+            density = density / density.max() * 0.38
+            ax_velo.fill_betweenx(i + density, x_range, i - density, alpha=0.7, color=pc(pt))
+            ax_velo.plot(x_range, i + density, color="black", lw=0.4)
+            ax_velo.plot(x_range, i - density, color="black", lw=0.4)
+            med = velos.median()
+            ax_velo.plot([med, med], [i - 0.3, i + 0.3], color="black", lw=1, ls="--", alpha=0.5)
+        except:
+            pass
+    ax_velo.set_yticks(range(len(pt_velo_sorted)))
+    ax_velo.set_yticklabels(pt_velo_sorted, fontsize=7, fontfamily="monospace")
+    ax_velo.set_xlabel("Velocity (mph)", fontsize=7, color=MUTED_TEXT)
+    ax_velo.set_title("Velocity Distribution", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_velo.tick_params(labelsize=6, colors=MUTED_TEXT)
+    for sp in ax_velo.spines.values(): sp.set_color(GRID_COLOR)
+
+    # ---- Row 2, Col 1: Movement (avg dots only) ----
+    ax_mov = fig.add_subplot(gs[2, 1]); ax_mov.set_facecolor(PANEL_COLOR)
+    ax_mov.axhline(0, color=GRID_COLOR, ls="-", lw=1, zorder=1)
+    ax_mov.axvline(0, color=GRID_COLOR, ls="-", lw=1, zorder=1)
+    for r in [5, 10, 15, 20]:
+        ax_mov.add_patch(plt.Circle((0, 0), r, fill=False, ec=GRID_COLOR, lw=0.3, ls="--", alpha=0.3))
+    for pt in pts:
+        s = p[p["PitchType"] == pt]
+        hb = s["HorzBreak"].dropna(); ivb = s["InducedVertBreak"].dropna()
+        if not hb.empty and not ivb.empty:
+            ax_mov.scatter(hb.mean(), ivb.mean(), c=pc(pt), label=pt, s=120, alpha=0.95,
+                          edgecolors="black", linewidths=1, zorder=5, marker="o")
+    ax_mov.set_xlim(-25, 25); ax_mov.set_ylim(-25, 25)
+    ax_mov.set_xlabel("HB (in)", fontsize=7, color=MUTED_TEXT)
+    ax_mov.set_ylabel("IVB (in)", fontsize=7, color=MUTED_TEXT)
+    ax_mov.set_title("Avg Pitch Movement", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_mov.legend(loc="upper center", bbox_to_anchor=(.5, -.06), ncol=min(len(pts), 5),
+                  fontsize=6, frameon=False, labelcolor=TEXT_COLOR)
+    ax_mov.tick_params(labelsize=6, colors=MUTED_TEXT)
+    for sp in ax_mov.spines.values(): sp.set_color(GRID_COLOR)
+
+    # ---- Row 2, Col 2-3: Pitch Usage vs Batter Handedness ----
+    ax_usage = fig.add_subplot(gs[2, 2:]); ax_usage.set_facecolor(PANEL_COLOR)
+    lhb_data = p[p["BatterSide"] == "Left"]
+    rhb_data = p[p["BatterSide"] == "Right"]
+    lhb_total = len(lhb_data); rhb_total = len(rhb_data)
+
+    bar_pts = sorted(pts, key=lambda x: p[p["PitchType"] == x]["RelSpeed"].median()
+                     if not p[p["PitchType"] == x]["RelSpeed"].dropna().empty else 0, reverse=True)
+    y_pos = np.arange(len(bar_pts))
+    bar_h = 0.35
+
+    for i, pt in enumerate(bar_pts):
+        lhb_pct = len(lhb_data[lhb_data["PitchType"] == pt]) / lhb_total * 100 if lhb_total > 0 else 0
+        rhb_pct = len(rhb_data[rhb_data["PitchType"] == pt]) / rhb_total * 100 if rhb_total > 0 else 0
+        # LHB bars go left (negative), RHB go right (positive)
+        ax_usage.barh(i + bar_h / 2, -lhb_pct, bar_h, color=pc(pt), alpha=0.8, edgecolor="black", lw=0.3)
+        ax_usage.barh(i - bar_h / 2, rhb_pct, bar_h, color=pc(pt), alpha=0.8, edgecolor="black", lw=0.3)
+        if lhb_pct > 2:
+            ax_usage.text(-lhb_pct / 2, i + bar_h / 2, f"{lhb_pct:.1f}%", ha="center", va="center",
+                         fontsize=6, fontweight="bold", color="white")
+        if rhb_pct > 2:
+            ax_usage.text(rhb_pct / 2, i - bar_h / 2, f"{rhb_pct:.1f}%", ha="center", va="center",
+                         fontsize=6, fontweight="bold", color="white")
+
+    ax_usage.set_yticks(y_pos)
+    ax_usage.set_yticklabels(bar_pts, fontsize=7, fontfamily="monospace")
+    ax_usage.axvline(0, color="black", lw=1)
+    max_pct = max(60, max(
+        [len(lhb_data[lhb_data["PitchType"] == pt]) / max(lhb_total, 1) * 100 for pt in bar_pts] +
+        [len(rhb_data[rhb_data["PitchType"] == pt]) / max(rhb_total, 1) * 100 for pt in bar_pts]
+    ) + 10)
+    ax_usage.set_xlim(-max_pct, max_pct)
+    ticks = ax_usage.get_xticks()
+    ax_usage.set_xticklabels([f"{abs(t):.0f}%" for t in ticks], fontsize=6)
+    ax_usage.set_title("Pitch Usage", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_usage.text(-max_pct * 0.5, len(bar_pts) + 0.3, f"vs LHB ({lhb_total})", ha="center", fontsize=7,
+                 color=MUTED_TEXT, fontweight="bold")
+    ax_usage.text(max_pct * 0.5, len(bar_pts) + 0.3, f"vs RHB ({rhb_total})", ha="center", fontsize=7,
+                 color=MUTED_TEXT, fontweight="bold")
+    ax_usage.tick_params(labelsize=6, colors=MUTED_TEXT)
+    for sp in ax_usage.spines.values(): sp.set_color(GRID_COLOR)
+
+    # ---- Row 3: Release Point ----
+    ax_rp = fig.add_subplot(gs[3, 0]); draw_release(ax_rp, p, pts)
+
+    # ---- Row 3, Col 1-3: placeholder for future or just empty ----
+    # Use the rest of row 3 for the zone plots (LHB / RHB aggregate)
+    lhb_all = p[p["BatterSide"] == "Left"]
+    rhb_all = p[p["BatterSide"] == "Right"]
+    ax_zl = fig.add_subplot(gs[3, 1]); draw_zone(ax_zl, lhb_all, f"vs LHB ({len(lhb_all)})", pts)
+    ax_zr = fig.add_subplot(gs[3, 2]); draw_zone(ax_zr, rhb_all, f"vs RHB ({len(rhb_all)})", pts)
+
+    # Row 3, Col 3: empty or movement legend
+    ax_empty = fig.add_subplot(gs[3, 3]); ax_empty.set_facecolor(BG_COLOR); ax_empty.axis("off")
+
+    # ---- Row 4: Table ----
+    ax_t = fig.add_subplot(gs[4, :]); ax_t.set_facecolor(BG_COLOR); ax_t.axis("off")
+    trows = []
+    grade_cells = {}
+    for ri, pt in enumerate(pts):
+        s = p[p["PitchType"] == pt]; n = len(s)
+        s_iz = in_zone(s); _sw = s["PitchCall"].isin(SWING_CALLS)
+        _wh = s["PitchCall"] == "StrikeSwinging"; _ooz = ~s_iz
+        _ooz_sw = (_sw & _ooz).sum(); _ooz_n = _ooz.sum()
+        _iz_sw = (_sw & s_iz).sum(); _iz_wh = (_wh & s_iz).sum()
+        iz_whiff_str = f"{_iz_wh / _iz_sw * 100:.1f}%" if _iz_sw else "—"
+        _sw_ct = _sw.sum()
+        whiff_val = _wh.sum() / _sw_ct * 100 if _sw_ct else None
+        whiff_str = f"{whiff_val:.1f}%" if whiff_val is not None else "—"
+        chase_val = _ooz_sw / _ooz_n * 100 if _ooz_n else None
+        chase_str = f"{chase_val:.1f}%" if chase_val is not None else "—"
+        xw = s["xwOBA"].dropna()
+        xwoba_val = xw.mean() if not xw.empty else None
+        xwoba_str = f"{xwoba_val:.3f}" if xwoba_val is not None else "—"
+        avg_velo_raw = s["RelSpeed"].dropna()
+        avg_velo_val = avg_velo_raw.mean() if not avg_velo_raw.empty else None
+        zone_val = s_iz.sum() / n * 100 if n else None
+        zone_str = f"{zone_val:.1f}%" if zone_val is not None else "—"
+
+        trows.append([pt, n, f"{n / N * 100:.1f}%",
+                      fmt(s["RelSpeed"]), fmt(s["RelSpeed"], "max"),
+                      fmt(s["SpinRate"], d=0),
+                      fmt(s["InducedVertBreak"]), fmt(s["HorzBreak"]),
+                      fmt(s["Extension"]), fmt(s["RelHeight"]), fmt(s["RelSide"]),
+                      fmt(s["VertApprAngle"]),
+                      xwoba_str, zone_str, whiff_str, chase_str, iz_whiff_str])
+
+        data_row = ri + 1
+        if avg_velo_val is not None:
+            grade_cells[(data_row, 2)] = (pt, "velo", avg_velo_val, True)
+        if xwoba_val is not None:
+            grade_cells[(data_row, 11)] = (pt, "xwoba", xwoba_val, False)
+        if zone_val is not None:
+            grade_cells[(data_row, 12)] = (pt, "zone_pct", zone_val, True)
+        if whiff_val is not None:
+            grade_cells[(data_row, 13)] = (pt, "whiff_pct", whiff_val, True)
+        if chase_val is not None:
+            grade_cells[(data_row, 14)] = (pt, "chase_pct", chase_val, True)
+
+    all_sw_ct = sw.sum()
+    all_whiff = f"{wh.sum() / all_sw_ct * 100:.1f}%" if all_sw_ct else "0%"
+    all_xw = p["xwOBA"].dropna()
+    all_xwoba = f"{all_xw.mean():.3f}" if not all_xw.empty else "—"
+    trows.append(["All", N, "100%", "—", "—", "—", "—", "—",
+                  fmt(p["Extension"]), "—", "—", "—",
+                  all_xwoba, f"{zpct}%", all_whiff, f"{cpct}%", f"{izwp}%"])
+
+    cols = ["Count", "Usage%", "Avg\nVelo", "Max\nVelo", "Avg\nSpin",
+            "IVB", "HB", "Ext", "RelH", "RelS", "VAA",
+            "xwOBA", "Zone%", "Whiff%", "Chase%", "IZ\nWhiff%"]
+    tbl = ax_t.table(cellText=[r[1:] for r in trows], rowLabels=[r[0] for r in trows],
+                     colLabels=cols, loc="center", cellLoc="center")
+    tbl.auto_set_font_size(False); tbl.set_fontsize(7); tbl.scale(1, 1.4)
+
+    for (row, col), cell in tbl.get_celld().items():
+        cell.set_edgecolor(GRID_COLOR); cell.set_linewidth(0.5)
+        if row == 0:
+            cell.set_facecolor("#2E2E2E")
+            cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=6.5)
+        elif col == -1:
+            pitch_name = cell.get_text().get_text()
+            if pitch_name == "All":
+                cell.set_facecolor("#F0F0F0")
+                cell.set_text_props(fontweight="bold", color=TEXT_COLOR, fontfamily="monospace")
+            else:
+                cell.set_facecolor(pc(pitch_name))
+                cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace")
+        else:
+            graded = False
+            if (row, col) in grade_cells and row <= len(pts):
+                pt_name, stat_name, raw_val, higher_better = grade_cells[(row, col)]
+                gc = grade_color(pt_name, stat_name, raw_val, higher_better)
+                if gc is not None:
+                    cell.set_facecolor(gc)
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace", fontweight="bold")
+                    graded = True
+            if not graded:
+                if row == len(trows):
+                    cell.set_facecolor("#F0F0F0")
+                    cell.set_text_props(color=TEXT_COLOR, fontweight="bold", fontfamily="monospace")
+                elif row % 2 == 0:
+                    cell.set_facecolor("#F7F8FA")
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace")
+                else:
+                    cell.set_facecolor("#FFFFFF")
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace")
+
+    return fig
+
+# ===========================================================================
+# HEATMAP FUNCTIONS
+# ===========================================================================
+# Run value mapping for pitch outcomes (from pitcher perspective, negative = good for pitcher)
+RUN_VALUES = {
+    "StrikeSwinging": -0.065, "StrikeCalled": -0.038, "FoulBallNotFieldable": -0.025,
+    "BallCalled": 0.032, "BallinDirt": 0.032, "BallIntentional": 0.032,
+    "HitByPitch": 0.035,
+}
+# For InPlay: use xwOBA converted to run value scale (approx wOBA/1.15 - league_avg_rv)
+# We'll compute per-pitch run values on the fly
+
+def compute_pitch_run_value(row):
+    """Estimate per-pitch run value. Negative = good for pitcher."""
+    call = row.get("PitchCall", "")
+    if call in RUN_VALUES:
+        return RUN_VALUES[call]
+    if call == "InPlay":
+        xw = row.get("xwOBA", np.nan)
+        if pd.notna(xw):
+            # Convert xwOBA to run value scale: (xwOBA - league_avg) / scale
+            return (xw - 0.320) / 1.15  # ~centered around 0
+        return 0.0
+    return 0.0
+
+def generate_heatmap(p, pitch_type, metric="run_value"):
+    """
+    Generate a side-by-side heatmap (LHB / RHB) for a given pitch type.
+    metric: 'run_value', 'whiff', or 'xwoba'
+    Returns a matplotlib Figure.
+    """
+    sub = p[p["PitchType"] == pitch_type].copy()
+    sub = sub[sub["PlateLocSide"].notna() & sub["PlateLocHeight"].notna()]
+    if len(sub) < 5:
+        return None
+
+    # Compute metric values per pitch
+    if metric == "run_value":
+        sub["_val"] = sub.apply(compute_pitch_run_value, axis=1)
+        cmap_name = "RdBu_r"  # red=bad for pitcher, blue=good
+        title_label = "Run Value"
+        vmin, vmax = -0.08, 0.08
+    elif metric == "whiff":
+        sub["_val"] = (sub["PitchCall"] == "StrikeSwinging").astype(float)
+        cmap_name = "YlOrRd"
+        title_label = "Whiff Rate"
+        vmin, vmax = 0, 0.6
+    elif metric == "xwoba":
+        # Only BIP pitches have xwOBA; for non-BIP assign outcome-based values
+        def xw_val(row):
+            if row["PitchCall"] == "InPlay" and pd.notna(row.get("xwOBA")):
+                return row["xwOBA"]
+            elif row["PitchCall"] == "StrikeSwinging":
+                return 0.0
+            elif row["PitchCall"] == "StrikeCalled":
+                return 0.05
+            elif row["PitchCall"] in ("BallCalled", "BallinDirt"):
+                return 0.4  # neutral-ish
+            return np.nan
+        sub["_val"] = sub.apply(xw_val, axis=1)
+        sub = sub[sub["_val"].notna()]
+        cmap_name = "RdYlBu_r"  # red=high xwOBA (bad for pitcher)
+        title_label = "xwOBA"
+        vmin, vmax = 0, 0.8
+    else:
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), facecolor=BG_COLOR)
+
+    for idx, (side, label) in enumerate([("Left", "vs LHB"), ("Right", "vs RHB")]):
+        ax = axes[idx]
+        ax.set_facecolor(PANEL_COLOR)
+        side_data = sub[sub["BatterSide"] == side]
+
+        # Draw zone
+        ax.add_patch(Rectangle((-0.95, 1.6), 1.9, 1.9, fill=False, ec="black", lw=1.5, zorder=10))
+        ax.add_patch(Polygon([(-.708, .15), (.708, .15), (.708, .35), (0, .55), (-.708, .35)],
+                             closed=True, fc="#CCCCCC", ec="black", lw=.5, alpha=0.5, zorder=10))
+
+        if len(side_data) >= 5:
+            x = side_data["PlateLocSide"].values
+            y = side_data["PlateLocHeight"].values
+            vals = side_data["_val"].values
+
+            # Create grid
+            xi = np.linspace(-2.5, 2.5, 80)
+            yi = np.linspace(-0.5, 5.0, 80)
+            Xi, Yi = np.meshgrid(xi, yi)
+
+            # KDE-weighted interpolation
+            try:
+                positions = np.vstack([x, y])
+                kde = gaussian_kde(positions, bw_method=0.4)
+                density = kde(np.vstack([Xi.ravel(), Yi.ravel()])).reshape(Xi.shape)
+
+                # Weighted value surface
+                Zi = np.zeros_like(Xi)
+                for px, py, pv in zip(x, y, vals):
+                    dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
+                    weights = np.exp(-dist2 / (2 * 0.3 ** 2))
+                    Zi += weights * pv
+                weight_sum = np.zeros_like(Xi)
+                for px, py in zip(x, y):
+                    dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
+                    weight_sum += np.exp(-dist2 / (2 * 0.3 ** 2))
+                weight_sum[weight_sum == 0] = 1
+                Zi = Zi / weight_sum
+
+                # Mask low-density areas
+                density_thresh = density.max() * 0.05
+                Zi[density < density_thresh] = np.nan
+
+                im = ax.pcolormesh(Xi, Yi, Zi, cmap=cmap_name, vmin=vmin, vmax=vmax,
+                                   shading="gouraud", zorder=1)
+            except:
+                pass
+
+            # Scatter actual pitch locations
+            ax.scatter(x, y, c="black", s=8, alpha=0.5, zorder=6)
+
+        n_side = len(side_data)
+        ax.set_title(f"{pitch_type} {label} ({n_side})", fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=8)
+        ax.set_xlim(-2.5, 2.5); ax.set_ylim(-0.5, 5.0)
+        ax.set_xlabel("PlateLocSide", fontsize=8, color=MUTED_TEXT)
+        if idx == 0:
+            ax.set_ylabel("PlateLocHeight", fontsize=8, color=MUTED_TEXT)
+        ax.tick_params(labelsize=7, colors=MUTED_TEXT)
+        for sp in ax.spines.values(): sp.set_color(GRID_COLOR)
+
+    # Colorbar
+    fig.subplots_adjust(right=0.88)
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+    sm = plt.cm.ScalarMappable(cmap=cmap_name, norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax)
+    cbar.set_label(title_label, fontsize=9)
+    cbar.ax.tick_params(labelsize=7)
+
+    fig.suptitle(f"{title_label} Heatmap — {pitch_type}", fontsize=14, fontweight="bold",
+                 color=TEXT_COLOR, y=0.98)
+
+    return fig
+
+# ===========================================================================
+# HELPER: Parse game date from session
+# ===========================================================================
+def parse_session_date(session, fallback_date):
+    """Extract game date from session metadata."""
+    gdate = None
+    for field in ["gameDateLocal", "gameDateUtc", "gameDate", "startDateTimeLocal", "startDateTimeUtc"]:
+        val = session.get(field, "")
+        if val and isinstance(val, str):
+            try:
+                gdate = datetime.fromisoformat(val.replace("Z", "").split("+")[0]).date()
+                return gdate
+            except:
+                pass
+    # Scan all string fields for a date
+    for k, v in session.items():
+        if isinstance(v, str) and len(v) >= 10:
+            try:
+                gdate = datetime.fromisoformat(v.replace("Z", "").split("+")[0]).date()
+                return gdate
+            except:
+                pass
+    return fallback_date
+
+# ===========================================================================
 # STREAMLIT UI
 # ===========================================================================
 st.title("⚾ TrackMan Pitching Report")
@@ -627,34 +1070,28 @@ with st.sidebar:
                 st.session_state["sessions"] = sessions
                 st.session_state["teams"] = extract_teams_from_sessions(sessions)
                 st.session_state["_date_key"] = date_key
-                # Clear pitcher data since dates changed
                 st.session_state.pop("pitcher_outings", None)
                 st.session_state.pop("pitcher_names", None)
                 st.session_state.pop("_team_key", None)
-                st.success(f"Found {len(sessions)} session(s)")
             else:
                 st.error("No sessions found for this date range")
 
-    # Manual refresh button
-    if st.button("🔄 Refresh Sessions", use_container_width=True):
+    # Manual refresh
+    if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear()
-        st.session_state.pop("_date_key", None)
-        st.session_state.pop("pitcher_outings", None)
-        st.session_state.pop("pitcher_names", None)
-        st.session_state.pop("_team_key", None)
+        for k in ["_date_key", "pitcher_outings", "pitcher_names", "_team_key"]:
+            st.session_state.pop(k, None)
         st.rerun()
 
-    # Team dropdown — persist selection
+    # Team dropdown — persist selection, searchable
     if "teams" in st.session_state and st.session_state["teams"]:
         teams_list = st.session_state["teams"]
-        # Restore previous selection if it still exists in the list
         prev_team = st.session_state.get("selected_team", None)
         if prev_team and prev_team in teams_list:
             default_idx = teams_list.index(prev_team)
         else:
             default_idx = 0
-        selected_team = st.selectbox("Select Team", teams_list, index=default_idx, key="team_select")
-
+        selected_team = st.selectbox("Select Team", teams_list, index=default_idx)
         if selected_team:
             st.session_state["selected_team"] = selected_team
 
@@ -664,9 +1101,11 @@ with st.sidebar:
         meta = D1_PCTLS.get("_meta", {})
         st.success(f"D1 Percentiles loaded\n\n{meta.get('sessions_scanned', 0)} sessions · {meta.get('generated', '?')[:10]}")
     else:
-        st.warning("No D1_percentiles.json found.\nPlace it next to this script or in Downloads.\nColor grading disabled.")
+        st.warning("No D1_percentiles.json found.\nColor grading disabled.")
 
-# Main area — find pitchers and generate
+# ===========================================================================
+# MAIN CONTENT
+# ===========================================================================
 if "sessions" in st.session_state and "selected_team" in st.session_state:
     team_name = st.session_state["selected_team"]
     sessions = st.session_state["sessions"]
@@ -679,117 +1118,46 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
     st.subheader(f"{team_name} — {len(team_sessions)} game(s) found")
 
     # Show game list
-    game_info = []
     for s in team_sessions:
         ht = s.get("homeTeam", {}).get("name", "")
         at = s.get("awayTeam", {}).get("name", "")
-        gd = None
-        for field in ["gameDateLocal", "gameDateUtc", "gameDate", "startDateTimeLocal", "startDateTimeUtc"]:
-            val = s.get(field, "")
-            if val and isinstance(val, str):
-                try:
-                    gd = datetime.fromisoformat(val.replace("Z", "").split("+")[0]).date()
-                    break
-                except:
-                    pass
-        if gd is None: gd = date_from
-        game_info.append(f"{gd} — {ht} vs {at}")
+        gd = parse_session_date(s, date_from)
+        st.text(f"  📅 {gd} — {ht} vs {at}")
 
-    for gi in game_info:
-        st.text(f"  📅 {gi}")
-
-    # Debug: show raw date fields from first session (remove after confirming dates work)
-    with st.expander("🔧 Debug: Raw session date fields (click to check)"):
-        s0 = team_sessions[0]
-        date_fields = {}
-        for k, v in s0.items():
-            kl = k.lower()
-            if "date" in kl or "time" in kl or "start" in kl:
-                date_fields[k] = v
-        st.json(date_fields)
-
-    # Fetch all game data and find pitchers
+    # Load pitcher data
     if "pitcher_outings" not in st.session_state or st.session_state.get("_team_key") != team_name:
         with st.spinner("Loading game data and finding pitchers..."):
-            # pitcher_outings: { "Munn, Drew": [ (df, gdate, opp), (df, gdate2, opp2), ... ] }
             pitcher_outings = {}
-
             for session in team_sessions:
                 sid = session["sessionId"]
                 ht = session.get("homeTeam", {}).get("name", "")
                 at = session.get("awayTeam", {}).get("name", "")
-                if team_name.lower() in ht.lower():
-                    opp = at
-                elif team_name.lower() in at.lower():
-                    opp = ht
-                else:
-                    opp = "Opponent"
-
-                gdl = session.get("gameDateLocal", "") or session.get("gameDateUtc", "") or session.get("gameDate", "") or ""
-                gdate = None
-                # Try multiple date sources and formats
-                date_candidates = [gdl]
-                # Also check other possible fields
-                for field in ["startDateTimeLocal", "startDateTimeUtc", "sessionDate"]:
-                    val = session.get(field, "")
-                    if val: date_candidates.append(val)
-
-                for dc in date_candidates:
-                    if gdate: break
-                    if not dc or not isinstance(dc, str): continue
-                    for fmt_str in [None, "%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"]:
-                        try:
-                            if fmt_str is None:
-                                gdate = datetime.fromisoformat(dc.replace("Z", "").split("+")[0]).date()
-                            else:
-                                gdate = datetime.strptime(dc[:len(fmt_str.replace("%","x"))], fmt_str).date()
-                            break
-                        except:
-                            continue
-
-                if gdate is None:
-                    # Last resort: try to find any date-like string in session
-                    for k, v in session.items():
-                        if gdate: break
-                        if isinstance(v, str) and len(v) >= 10:
-                            try:
-                                gdate = datetime.fromisoformat(v.replace("Z", "").split("+")[0]).date()
-                            except:
-                                pass
-                if gdate is None:
-                    gdate = date_from  # absolute last fallback
+                opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
+                gdate = parse_session_date(session, date_from)
 
                 plays_raw, balls_raw = fetch_game_data(sid)
                 if not plays_raw: continue
-
                 df = flatten_game(plays_raw, balls_raw)
                 if df.empty: continue
-
-                # Identify team code
                 tc = identify_team_code(df, team_name, ht, at)
-                if tc:
-                    tdf = df[df["PitcherTeam"] == tc].copy()
-                else:
-                    continue
+                if not tc: continue
+                tdf = df[df["PitcherTeam"] == tc].copy()
                 if tdf.empty: continue
 
                 tdf["PitchType"] = tdf.apply(resolve_pt, axis=1)
                 tdf, _ = auto_correct_pitch_types(tdf)
                 tdf["xwOBA"] = tdf.apply(
-                    lambda r: calc_xwoba(r["ExitSpeed"], r["LaunchAngle"]) if r["PitchCall"] == "InPlay" else np.nan,
-                    axis=1)
+                    lambda r: calc_xwoba(r["ExitSpeed"], r["LaunchAngle"]) if r["PitchCall"] == "InPlay" else np.nan, axis=1)
                 tdf["InZone"] = in_zone(tdf)
 
                 pitchers = (tdf.sort_values("PitchNo").groupby("Pitcher")["PitchNo"].min()
                             .sort_values().index.tolist())
-
                 for pn in pitchers:
                     p_df = tdf[tdf["Pitcher"] == pn].copy().sort_values("PitchNo").reset_index(drop=True)
                     if pn not in pitcher_outings:
                         pitcher_outings[pn] = []
                     pitcher_outings[pn].append((p_df, gdate, opp))
 
-            # Sort outings by date within each pitcher
             for pn in pitcher_outings:
                 pitcher_outings[pn].sort(key=lambda x: x[1])
 
@@ -797,74 +1165,143 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
             st.session_state["pitcher_names"] = sorted(pitcher_outings.keys())
             st.session_state["_team_key"] = team_name
 
-    # Pitcher selection — just unique names, each generates all outings
+    # Pitcher selection
     if "pitcher_names" in st.session_state and st.session_state["pitcher_names"]:
         st.divider()
 
-        # Show outing counts next to names
         outing_labels = []
         for pn in st.session_state["pitcher_names"]:
             n_outings = len(st.session_state["pitcher_outings"][pn])
             if n_outings > 1:
                 outing_labels.append(f"{pn}  ({n_outings} outings)")
             else:
-                gdate, opp = st.session_state["pitcher_outings"][pn][0][1], st.session_state["pitcher_outings"][pn][0][2]
-                outing_labels.append(f"{pn}  ({gdate} vs {opp})")
+                gd = st.session_state["pitcher_outings"][pn][0][1]
+                op = st.session_state["pitcher_outings"][pn][0][2]
+                outing_labels.append(f"{pn}  ({gd} vs {op})")
 
-        selected_labels = st.multiselect(
-            "Select Pitcher(s) to Generate Reports",
-            outing_labels,
-            default=None
-        )
-
-        # Map labels back to pitcher names
+        selected_labels = st.multiselect("Select Pitcher(s)", outing_labels, default=None)
         label_to_name = dict(zip(outing_labels, st.session_state["pitcher_names"]))
         selected_names = [label_to_name[lbl] for lbl in selected_labels]
 
-        if selected_names and st.button("⚾ Generate Reports", type="primary", use_container_width=True):
-            figures = []
-            with st.spinner("Generating reports..."):
-                for pname in selected_names:
-                    outings = st.session_state["pitcher_outings"][pname]
-                    for p_data, gdate, opp in outings:
-                        if len(p_data) == 0: continue
-                        fig = generate_pitcher_page(p_data, pname, gdate, opp)
-                        if fig:
-                            figures.append((f"{pname} ({gdate} vs {opp})", fig))
+        if selected_names:
+            # ========== TABS ==========
+            tab_reports, tab_summary, tab_heatmaps = st.tabs(["📄 Game Reports", "📊 Season Summary", "🔥 Heatmaps"])
 
-            if figures:
-                # Show preview
-                st.divider()
-                st.subheader("📋 Report Preview")
-                for label, fig in figures:
-                    st.pyplot(fig, use_container_width=True)
-                    st.divider()
+            # ========== TAB 1: GAME REPORTS ==========
+            with tab_reports:
+                if st.button("⚾ Generate Game Reports", type="primary", use_container_width=True, key="btn_reports"):
+                    figures = []
+                    with st.spinner("Generating reports..."):
+                        for pname in selected_names:
+                            for p_data, gdate, opp in st.session_state["pitcher_outings"][pname]:
+                                if len(p_data) == 0: continue
+                                fig = generate_pitcher_page(p_data, pname, gdate, opp)
+                                if fig:
+                                    figures.append((f"{pname} ({gdate} vs {opp})", fig))
 
-                # Build PDF for download
-                pdf_buffer = io.BytesIO()
-                with PdfPages(pdf_buffer) as pdf:
-                    for label, fig in figures:
-                        pdf.savefig(fig, bbox_inches="tight", facecolor=BG_COLOR)
-                        plt.close(fig)
-                pdf_buffer.seek(0)
+                    if figures:
+                        for label, fig in figures:
+                            st.pyplot(fig, use_container_width=True)
+                            st.divider()
 
-                # Generate filename
-                safe_team = team_name.replace(" ", "")[:15]
-                fname = f"PitchingReport_{safe_team}_{date_from}_to_{date_to}.pdf"
+                        pdf_buffer = io.BytesIO()
+                        with PdfPages(pdf_buffer) as pdf:
+                            for label, fig in figures:
+                                pdf.savefig(fig, bbox_inches="tight", facecolor=BG_COLOR)
+                                plt.close(fig)
+                        pdf_buffer.seek(0)
+                        safe_team = team_name.replace(" ", "")[:15]
+                        st.download_button("📥 Download Game Reports PDF", data=pdf_buffer,
+                                           file_name=f"GameReports_{safe_team}_{date_from}_to_{date_to}.pdf",
+                                           mime="application/pdf", type="primary", use_container_width=True)
+                    else:
+                        st.error("No reports generated")
 
-                st.download_button(
-                    label="📥 Download PDF Report",
-                    data=pdf_buffer,
-                    file_name=fname,
-                    mime="application/pdf",
-                    type="primary",
-                    use_container_width=True
-                )
-            else:
-                st.error("No reports could be generated")
+            # ========== TAB 2: SEASON SUMMARY ==========
+            with tab_summary:
+                if st.button("📊 Generate Season Summaries", type="primary", use_container_width=True, key="btn_summary"):
+                    figures = []
+                    with st.spinner("Generating season summaries..."):
+                        for pname in selected_names:
+                            outings = st.session_state["pitcher_outings"][pname]
+                            fig = generate_season_summary(pname, outings, date_from, date_to)
+                            if fig:
+                                figures.append((pname, fig))
+
+                    if figures:
+                        for label, fig in figures:
+                            st.pyplot(fig, use_container_width=True)
+                            st.divider()
+
+                        pdf_buffer = io.BytesIO()
+                        with PdfPages(pdf_buffer) as pdf:
+                            for label, fig in figures:
+                                pdf.savefig(fig, bbox_inches="tight", facecolor=BG_COLOR)
+                                plt.close(fig)
+                        pdf_buffer.seek(0)
+                        safe_team = team_name.replace(" ", "")[:15]
+                        st.download_button("📥 Download Season Summary PDF", data=pdf_buffer,
+                                           file_name=f"SeasonSummary_{safe_team}_{date_from}_to_{date_to}.pdf",
+                                           mime="application/pdf", type="primary", use_container_width=True)
+                    else:
+                        st.error("No summaries generated")
+
+            # ========== TAB 3: HEATMAPS ==========
+            with tab_heatmaps:
+                if len(selected_names) == 1:
+                    hm_pitcher = selected_names[0]
+                else:
+                    hm_pitcher = st.selectbox("Select pitcher for heatmaps", selected_names, key="hm_pitcher")
+
+                # Combine all outings for this pitcher
+                all_outing_dfs = []
+                for p_df, gdate, opp in st.session_state["pitcher_outings"][hm_pitcher]:
+                    all_outing_dfs.append(p_df)
+                if all_outing_dfs:
+                    hm_data = pd.concat(all_outing_dfs, ignore_index=True)
+                else:
+                    hm_data = pd.DataFrame()
+
+                if not hm_data.empty:
+                    avail_types = hm_data["PitchType"].value_counts()
+                    avail_types = avail_types[avail_types >= 5].index.tolist()
+
+                    if avail_types:
+                        hm_pitch_type = st.selectbox("Select Pitch Type", avail_types, key="hm_pt")
+
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            gen_rv = st.button("🔴 Run Value", type="primary", use_container_width=True, key="btn_rv")
+                        with col2:
+                            gen_whiff = st.button("💨 Whiff Rate", type="primary", use_container_width=True, key="btn_whiff")
+                        with col3:
+                            gen_xwoba = st.button("📈 xwOBA", type="primary", use_container_width=True, key="btn_xw")
+
+                        for do_gen, metric, label in [(gen_rv, "run_value", "Run Value"),
+                                                       (gen_whiff, "whiff", "Whiff Rate"),
+                                                       (gen_xwoba, "xwoba", "xwOBA")]:
+                            if do_gen:
+                                with st.spinner(f"Generating {label} heatmap..."):
+                                    fig = generate_heatmap(hm_data, hm_pitch_type, metric)
+                                if fig:
+                                    st.pyplot(fig, use_container_width=True)
+                                    # Download
+                                    buf = io.BytesIO()
+                                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150, facecolor=BG_COLOR)
+                                    buf.seek(0)
+                                    st.download_button(f"📥 Download {label} Heatmap",
+                                                       data=buf,
+                                                       file_name=f"Heatmap_{label}_{hm_pitcher}_{hm_pitch_type}.png",
+                                                       mime="image/png", use_container_width=True)
+                                    plt.close(fig)
+                                else:
+                                    st.warning(f"Not enough {hm_pitch_type} data for {label} heatmap (need 5+ pitches with location)")
+                    else:
+                        st.warning("No pitch types with enough data for heatmaps")
+                else:
+                    st.warning("No pitch data available")
+
     elif "pitcher_names" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
 else:
-    st.info("👈 Select a date range and click **Fetch Sessions** to get started")
-
-
+    st.info("👈 Select a date range to get started — sessions load automatically")
