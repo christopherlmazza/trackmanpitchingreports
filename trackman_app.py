@@ -1240,8 +1240,8 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
         if selected_names:
             # ========== TABS ==========
-            tab_reports, tab_summary, tab_heatmaps, tab_debug = st.tabs(
-                ["📄 Game Reports", "📊 Season Summary", "🔥 Heatmaps", "🔧 Debug"])
+            tab_reports, tab_summary, tab_pitchmix, tab_heatmaps, tab_debug = st.tabs(
+                ["📄 Game Reports", "📊 Season Summary", "🎯 Pitch Mix", "🔥 Heatmaps", "🔧 Debug"])
 
             def load_full_pitcher_data(pitcher_names_to_load):
                 """Load full play+ball data for selected pitchers. Caches in session_state."""
@@ -1341,12 +1341,78 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
             with tab_summary:
                 if st.button("📊 Generate Season Summaries", type="primary", use_container_width=True, key="btn_summary"):
                     figures = []
-                    with st.spinner("Fetching data & generating summaries..."):
-                        load_full_pitcher_data(selected_names)
+                    with st.spinner("Fetching full 2026 season data..."):
+                        # ---- Fetch ALL sessions for the full season ----
+                        season_start = "2026-01-01T00:00:00Z"
+                        season_end = f"{date.today() + timedelta(days=1)}T00:00:00Z"
+
+                        # Check if we already have season data cached for this team
+                        season_cache_key = f"_season_outings_{team_name}"
+                        if season_cache_key not in st.session_state:
+                            season_sessions = fetch_sessions(season_start, season_end)
+                            if season_sessions:
+                                season_team_sessions = get_sessions_for_team(season_sessions, team_name)
+                            else:
+                                season_team_sessions = []
+
+                            if season_team_sessions:
+                                # Parallel fetch all game data
+                                season_outings = {}  # pitcher_name -> [(df, gdate, opp), ...]
+
+                                def fetch_season_session(session):
+                                    sid = session["sessionId"]
+                                    plays_raw, balls_raw = fetch_game_data(sid)
+                                    if not plays_raw: return None
+                                    return (session, plays_raw, balls_raw)
+
+                                results = []
+                                with ThreadPoolExecutor(max_workers=8) as executor:
+                                    futures = {executor.submit(fetch_season_session, s): s for s in season_team_sessions}
+                                    for future in as_completed(futures):
+                                        r = future.result()
+                                        if r: results.append(r)
+
+                                for session, plays_raw, balls_raw in results:
+                                    ht = session.get("homeTeam", {}).get("name", "")
+                                    at = session.get("awayTeam", {}).get("name", "")
+                                    opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
+                                    gdate = parse_session_date(session, date.today())
+
+                                    df = flatten_game(plays_raw, balls_raw)
+                                    if df.empty: continue
+                                    tc = identify_team_code(df, team_name, ht, at)
+                                    if not tc: continue
+                                    tdf = df[df["PitcherTeam"] == tc].copy()
+                                    if tdf.empty: continue
+
+                                    tdf["PitchType"] = tdf.apply(resolve_pt, axis=1)
+                                    tdf, _ = auto_correct_pitch_types(tdf)
+                                    tdf["xwOBA"] = tdf.apply(
+                                        lambda r: calc_xwoba(r["ExitSpeed"], r["LaunchAngle"]) if r["PitchCall"] == "InPlay" else np.nan, axis=1)
+                                    tdf["InZone"] = in_zone(tdf)
+
+                                    for pn in tdf["Pitcher"].unique():
+                                        p_df = tdf[tdf["Pitcher"] == pn].copy().sort_values("PitchNo").reset_index(drop=True)
+                                        if pn not in season_outings:
+                                            season_outings[pn] = []
+                                        season_outings[pn].append((p_df, gdate, opp))
+
+                                for pn in season_outings:
+                                    season_outings[pn].sort(key=lambda x: x[1])
+
+                                st.session_state[season_cache_key] = season_outings
+
+                        season_outings = st.session_state.get(season_cache_key, {})
+
+                        # Generate summaries for selected pitchers
+                        season_start_date = date(2026, 1, 1)
+                        season_end_date = date.today()
                         for pname in selected_names:
-                            if pname not in st.session_state.get("pitcher_outings", {}): continue
-                            outings = st.session_state["pitcher_outings"][pname]
-                            fig = generate_season_summary(pname, outings, date_from, date_to)
+                            if pname not in season_outings:
+                                st.warning(f"No season data found for {pname}")
+                                continue
+                            outings = season_outings[pname]
+                            fig = generate_season_summary(pname, outings, season_start_date, season_end_date)
                             if fig:
                                 figures.append((pname, fig))
 
@@ -1363,12 +1429,288 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         pdf_buffer.seek(0)
                         safe_team = team_name.replace(" ", "")[:15]
                         st.download_button("📥 Download Season Summary PDF", data=pdf_buffer,
-                                           file_name=f"SeasonSummary_{safe_team}_{date_from}_to_{date_to}.pdf",
+                                           file_name=f"SeasonSummary_{safe_team}_2026.pdf",
                                            mime="application/pdf", type="primary", use_container_width=True)
                     else:
                         st.error("No summaries generated")
 
-            # ========== TAB 3: HEATMAPS ==========
+            # ========== TAB 3: PITCH MIX ==========
+            with tab_pitchmix:
+                if len(selected_names) == 1:
+                    pm_pitcher = selected_names[0]
+                else:
+                    pm_pitcher = st.selectbox("Select pitcher for pitch mix", selected_names, key="pm_pitcher")
+
+                # Date range for pitch mix
+                st.caption("Date range for pitch mix analysis (defaults to full 2026 season)")
+                pm_col1, pm_col2 = st.columns(2)
+                with pm_col1:
+                    pm_from = st.date_input("From", value=date(2026, 1, 1), key="pm_from")
+                with pm_col2:
+                    pm_to = st.date_input("To", value=date.today(), key="pm_to")
+
+                # Filters
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    pm_hand = st.selectbox("Batter Hand", ["All", "vs RHH", "vs LHH"], key="pm_hand")
+                with fc2:
+                    pm_tto = st.selectbox("Time Through Order", ["All", "1st Time", "2nd Time", "3rd Time", "4th+ Time"], key="pm_tto")
+                with fc3:
+                    st.write("")  # spacer
+
+                if st.button("🎯 Generate Pitch Mix", type="primary", use_container_width=True, key="btn_pitchmix"):
+                    with st.spinner("Fetching season data for pitch mix..."):
+                        # Fetch full date range data
+                        pm_start = f"{pm_from}T00:00:00Z"
+                        pm_end = f"{pm_to + timedelta(days=1)}T00:00:00Z"
+
+                        pm_cache_key = f"_pm_data_{team_name}_{pm_from}_{pm_to}"
+                        if pm_cache_key not in st.session_state:
+                            pm_sessions = fetch_sessions(pm_start, pm_end)
+                            pm_team_sessions = get_sessions_for_team(pm_sessions, team_name) if pm_sessions else []
+
+                            pm_all_outings = {}
+                            if pm_team_sessions:
+                                def fetch_pm_session(session):
+                                    sid = session["sessionId"]
+                                    plays_raw, balls_raw = fetch_game_data(sid)
+                                    if not plays_raw: return None
+                                    return (session, plays_raw, balls_raw)
+
+                                results = []
+                                with ThreadPoolExecutor(max_workers=8) as executor:
+                                    futures = {executor.submit(fetch_pm_session, s): s for s in pm_team_sessions}
+                                    for future in as_completed(futures):
+                                        r = future.result()
+                                        if r: results.append(r)
+
+                                for session, plays_raw, balls_raw in results:
+                                    ht = session.get("homeTeam", {}).get("name", "")
+                                    at = session.get("awayTeam", {}).get("name", "")
+                                    opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
+                                    gdate = parse_session_date(session, date.today())
+
+                                    df = flatten_game(plays_raw, balls_raw)
+                                    if df.empty: continue
+                                    tc = identify_team_code(df, team_name, ht, at)
+                                    if not tc: continue
+                                    tdf = df[df["PitcherTeam"] == tc].copy()
+                                    if tdf.empty: continue
+
+                                    tdf["PitchType"] = tdf.apply(resolve_pt, axis=1)
+                                    tdf, _ = auto_correct_pitch_types(tdf)
+                                    tdf["InZone"] = in_zone(tdf)
+
+                                    for pn in tdf["Pitcher"].unique():
+                                        p_df = tdf[tdf["Pitcher"] == pn].copy().sort_values("PitchNo").reset_index(drop=True)
+                                        if pn not in pm_all_outings:
+                                            pm_all_outings[pn] = []
+                                        pm_all_outings[pn].append((p_df, gdate, opp))
+
+                            st.session_state[pm_cache_key] = pm_all_outings
+
+                        pm_outings = st.session_state.get(pm_cache_key, {})
+
+                        if pm_pitcher not in pm_outings or not pm_outings[pm_pitcher]:
+                            st.warning(f"No data found for {pm_pitcher} in this date range")
+                        else:
+                            # Combine all outings
+                            all_dfs = []
+                            for p_df, gdate, opp in pm_outings[pm_pitcher]:
+                                df_copy = p_df.copy()
+                                df_copy["_game_date"] = gdate
+                                df_copy["_opp"] = opp
+                                all_dfs.append(df_copy)
+                            pitch_data = pd.concat(all_dfs, ignore_index=True)
+
+                            # Compute TTO (time through order) per game
+                            # Track each batter's Nth appearance within each game
+                            pitch_data["_TTO"] = 0
+                            for gd in pitch_data["_game_date"].unique():
+                                game_mask = pitch_data["_game_date"] == gd
+                                game_df = pitch_data[game_mask].copy()
+                                # Get unique PAs in order
+                                pa_order = game_df.groupby(["Inning", "PAofInning"]).first().reset_index()
+                                pa_order = pa_order.sort_values("PitchNo")
+                                batter_count = {}
+                                pa_tto = {}
+                                for _, pa_row in pa_order.iterrows():
+                                    batter = pa_row["Batter"]
+                                    if batter not in batter_count:
+                                        batter_count[batter] = 0
+                                    batter_count[batter] += 1
+                                    pa_key = (pa_row["Inning"], pa_row["PAofInning"])
+                                    pa_tto[pa_key] = batter_count[batter]
+
+                                for idx in pitch_data[game_mask].index:
+                                    row = pitch_data.loc[idx]
+                                    pa_key = (row["Inning"], row["PAofInning"])
+                                    pitch_data.loc[idx, "_TTO"] = pa_tto.get(pa_key, 1)
+
+                            # Apply filters
+                            filtered = pitch_data.copy()
+
+                            # Batter hand filter
+                            if pm_hand == "vs RHH":
+                                filtered = filtered[filtered["BatterSide"] == "Right"]
+                            elif pm_hand == "vs LHH":
+                                filtered = filtered[filtered["BatterSide"] == "Left"]
+
+                            # TTO filter
+                            if pm_tto == "1st Time":
+                                filtered = filtered[filtered["_TTO"] == 1]
+                            elif pm_tto == "2nd Time":
+                                filtered = filtered[filtered["_TTO"] == 2]
+                            elif pm_tto == "3rd Time":
+                                filtered = filtered[filtered["_TTO"] == 3]
+                            elif pm_tto == "4th+ Time":
+                                filtered = filtered[filtered["_TTO"] >= 4]
+
+                            if len(filtered) == 0:
+                                st.warning("No pitches match these filters")
+                            else:
+                                N = len(filtered)
+                                pts = filtered["PitchType"].value_counts().index.tolist()
+
+                                # Define count situations
+                                def get_count_cat(balls, strikes):
+                                    """Categorize a count into situations."""
+                                    cats = []
+                                    # Early count: 0-0, 1-0, 0-1
+                                    if (balls, strikes) in [(0, 0), (1, 0), (0, 1)]:
+                                        cats.append("early")
+                                    # Pitcher ahead: 0-1, 0-2, 1-2
+                                    if strikes > balls and strikes >= 1:
+                                        cats.append("ahead")
+                                    # Pitcher behind: 1-0, 2-0, 2-1, 3-0, 3-1, 3-2
+                                    if balls > strikes:
+                                        cats.append("behind")
+                                    # Pre two strikes: any count with < 2 strikes
+                                    if strikes < 2:
+                                        cats.append("pre2k")
+                                    # Two strikes: 0-2, 1-2, 2-2, 3-2
+                                    if strikes == 2:
+                                        cats.append("twok")
+                                    return cats
+
+                                filtered["_count_cats"] = filtered.apply(
+                                    lambda r: get_count_cat(
+                                        int(r["Balls"]) if pd.notna(r["Balls"]) else 0,
+                                        int(r["Strikes"]) if pd.notna(r["Strikes"]) else 0
+                                    ), axis=1)
+
+                                situations = {
+                                    "All Counts": filtered,
+                                    "Early Count": filtered[filtered["_count_cats"].apply(lambda x: "early" in x)],
+                                    "Pitcher Ahead": filtered[filtered["_count_cats"].apply(lambda x: "ahead" in x)],
+                                    "Pitcher Behind": filtered[filtered["_count_cats"].apply(lambda x: "behind" in x)],
+                                    "Pre Two Strikes": filtered[filtered["_count_cats"].apply(lambda x: "pre2k" in x)],
+                                    "Two Strikes": filtered[filtered["_count_cats"].apply(lambda x: "twok" in x)],
+                                }
+
+                                # Build table data
+                                table_data = []
+                                all_counts_pcts = {}
+                                for pt in pts:
+                                    all_pct = len(filtered[filtered["PitchType"] == pt]) / N * 100 if N > 0 else 0
+                                    all_counts_pcts[pt] = all_pct
+
+                                for pt in pts:
+                                    row = {"Pitch Type": pt}
+                                    for sit_name, sit_df in situations.items():
+                                        sit_n = len(sit_df)
+                                        if sit_n > 0:
+                                            pct = len(sit_df[sit_df["PitchType"] == pt]) / sit_n * 100
+                                        else:
+                                            pct = 0
+                                        row[sit_name] = pct
+                                    table_data.append(row)
+
+                                # Display header
+                                hand_label = pm_hand if pm_hand != "All" else "vs All"
+                                tto_label = pm_tto if pm_tto != "All" else "All ABs"
+                                st.markdown(f"### {pm_pitcher}")
+                                st.caption(f"Pitch Mix {hand_label} · {tto_label} · {pm_from} to {pm_to} · {N} pitches")
+
+                                # Build the styled table using matplotlib for the Paradigm look
+                                fig, ax = plt.subplots(figsize=(14, max(2.5, 0.6 * len(pts) + 1.2)), facecolor="#1a1d23")
+                                ax.axis("off")
+
+                                col_labels = list(situations.keys())
+                                cell_text = []
+                                for row_d in table_data:
+                                    cell_text.append([f"{row_d[c]:.0f}%" for c in col_labels])
+
+                                tbl = ax.table(
+                                    cellText=cell_text,
+                                    rowLabels=[r["Pitch Type"] for r in table_data],
+                                    colLabels=[c.upper().replace(" ", "\n") for c in col_labels],
+                                    loc="center", cellLoc="center"
+                                )
+                                tbl.auto_set_font_size(False)
+                                tbl.set_fontsize(10)
+                                tbl.scale(1, 2.0)
+
+                                for (row, col), cell in tbl.get_celld().items():
+                                    cell.set_edgecolor("#2a2d35")
+                                    cell.set_linewidth(0.5)
+
+                                    if row == 0:
+                                        # Header row
+                                        cell.set_facecolor("#2a2d35")
+                                        cell.set_text_props(fontweight="bold", color="#8890a0",
+                                                          fontfamily="monospace", fontsize=8)
+                                    elif col == -1:
+                                        # Row labels (pitch type names)
+                                        pt_name = cell.get_text().get_text()
+                                        cell.set_facecolor("#1a1d23")
+                                        cell.set_text_props(fontweight="bold", color="white",
+                                                          fontfamily="monospace", fontsize=10)
+                                        # Add colored dot via text prefix
+                                        cell.get_text().set_text(f"● {pt_name}")
+                                        cell.get_text().set_color(pc(pt_name))
+                                    else:
+                                        # Data cells
+                                        cell.set_facecolor("#1e2128")
+                                        pt_name = table_data[row - 1]["Pitch Type"]
+                                        col_name = col_labels[col]
+                                        val = table_data[row - 1][col_name]
+                                        base = all_counts_pcts.get(pt_name, 0)
+                                        diff = val - base
+
+                                        if col_name != "All Counts" and abs(diff) >= 5:
+                                            if diff >= 5:
+                                                # Higher than baseline — green highlight
+                                                cell.set_facecolor("#1a3a2a")
+                                                cell.set_text_props(color="#4ade80", fontweight="bold",
+                                                                  fontfamily="monospace", fontsize=10)
+                                            elif diff <= -5:
+                                                # Lower than baseline — red highlight
+                                                cell.set_facecolor("#3a1a1a")
+                                                cell.set_text_props(color="#f87171", fontweight="bold",
+                                                                  fontfamily="monospace", fontsize=10)
+                                        else:
+                                            cell.set_text_props(color="white", fontfamily="monospace",
+                                                              fontsize=10)
+
+                                fig.tight_layout()
+                                st.pyplot(fig, use_container_width=True)
+
+                                # Download
+                                buf = io.BytesIO()
+                                fig.savefig(buf, format="png", bbox_inches="tight", dpi=150, facecolor="#1a1d23")
+                                buf.seek(0)
+                                st.download_button("📥 Download Pitch Mix", data=buf,
+                                                   file_name=f"PitchMix_{pm_pitcher}_{pm_hand}_{pm_tto}.png",
+                                                   mime="image/png", use_container_width=True)
+                                plt.close(fig)
+
+                                # Also show pitch count per situation
+                                with st.expander("📋 Sample sizes per situation"):
+                                    size_data = {name: len(df) for name, df in situations.items()}
+                                    st.write(size_data)
+
+            # ========== TAB 4: HEATMAPS ==========
             with tab_heatmaps:
                 if len(selected_names) == 1:
                     hm_pitcher = selected_names[0]
@@ -1496,3 +1838,4 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
         st.warning("No pitchers found for this team in the selected games")
 else:
     st.info("👈 Select a date range to get started — sessions load automatically")
+
