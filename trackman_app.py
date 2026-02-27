@@ -1342,21 +1342,32 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 if st.button("📊 Generate Season Summaries", type="primary", use_container_width=True, key="btn_summary"):
                     figures = []
                     with st.spinner("Fetching full 2026 season data..."):
-                        # ---- Fetch ALL sessions for the full season ----
-                        season_start = "2026-01-01T00:00:00Z"
-                        season_end = f"{date.today() + timedelta(days=1)}T00:00:00Z"
-
-                        # Always re-fetch to avoid stale cache issues
                         season_cache_key = f"_season_outings_{team_name}"
-                        if season_cache_key not in st.session_state:
-                            season_sessions = fetch_sessions(season_start, season_end)
-                            st.toast(f"Found {len(season_sessions) if season_sessions else 0} total sessions for 2026 season")
 
-                            if season_sessions:
-                                season_team_sessions = get_sessions_for_team(season_sessions, team_name)
-                                st.toast(f"Found {len(season_team_sessions)} games for {team_name}")
-                            else:
-                                season_team_sessions = []
+                        if season_cache_key not in st.session_state:
+                            # Fetch season in monthly chunks to avoid API limits
+                            all_season_sessions = []
+                            chunk_start = date(2026, 1, 1)
+                            today = date.today()
+                            while chunk_start <= today:
+                                chunk_end = min(chunk_start + timedelta(days=31), today + timedelta(days=1))
+                                cs = f"{chunk_start}T00:00:00Z"
+                                ce = f"{chunk_end}T00:00:00Z"
+                                chunk_sessions = fetch_sessions(cs, ce)
+                                if chunk_sessions:
+                                    all_season_sessions.extend(chunk_sessions)
+                                chunk_start = chunk_end
+
+                            # Deduplicate by sessionId
+                            seen_ids = set()
+                            unique_sessions = []
+                            for s in all_season_sessions:
+                                sid = s.get("sessionId", "")
+                                if sid and sid not in seen_ids:
+                                    seen_ids.add(sid)
+                                    unique_sessions.append(s)
+
+                            season_team_sessions = get_sessions_for_team(unique_sessions, team_name)
 
                             season_outings = {}
                             if season_team_sessions:
@@ -1372,8 +1383,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                     for future in as_completed(futures):
                                         r = future.result()
                                         if r: results.append(r)
-
-                                st.toast(f"Fetched data from {len(results)} games")
 
                                 for session, plays_raw, balls_raw in results:
                                     ht = session.get("homeTeam", {}).get("name", "")
@@ -1403,23 +1412,18 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                 for pn in season_outings:
                                     season_outings[pn].sort(key=lambda x: x[1])
 
-                                st.toast(f"Found {len(season_outings)} pitchers in season data")
-
-                            # Always write to cache, even if empty
                             st.session_state[season_cache_key] = season_outings
 
                         season_outings = st.session_state.get(season_cache_key, {})
 
                         if not season_outings:
-                            st.error(f"No season data found for {team_name}. Try clicking Refresh in the sidebar and try again.")
+                            st.error(f"No season data found for {team_name}. Hit Refresh in the sidebar and try again.")
                         else:
-                            # Generate summaries for selected pitchers
                             season_start_date = date(2026, 1, 1)
                             season_end_date = date.today()
                             for pname in selected_names:
                                 if pname not in season_outings:
-                                    # Show available pitchers to help debug
-                                    st.warning(f"No season data for {pname}. Available: {', '.join(list(season_outings.keys())[:10])}")
+                                    st.warning(f"No season data for {pname}")
                                     continue
                                 outings = season_outings[pname]
                                 fig = generate_season_summary(pname, outings, season_start_date, season_end_date)
