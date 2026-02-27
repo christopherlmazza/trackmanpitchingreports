@@ -1346,19 +1346,20 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         season_start = "2026-01-01T00:00:00Z"
                         season_end = f"{date.today() + timedelta(days=1)}T00:00:00Z"
 
-                        # Check if we already have season data cached for this team
+                        # Always re-fetch to avoid stale cache issues
                         season_cache_key = f"_season_outings_{team_name}"
                         if season_cache_key not in st.session_state:
                             season_sessions = fetch_sessions(season_start, season_end)
+                            st.toast(f"Found {len(season_sessions) if season_sessions else 0} total sessions for 2026 season")
+
                             if season_sessions:
                                 season_team_sessions = get_sessions_for_team(season_sessions, team_name)
+                                st.toast(f"Found {len(season_team_sessions)} games for {team_name}")
                             else:
                                 season_team_sessions = []
 
+                            season_outings = {}
                             if season_team_sessions:
-                                # Parallel fetch all game data
-                                season_outings = {}  # pitcher_name -> [(df, gdate, opp), ...]
-
                                 def fetch_season_session(session):
                                     sid = session["sessionId"]
                                     plays_raw, balls_raw = fetch_game_data(sid)
@@ -1371,6 +1372,8 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                     for future in as_completed(futures):
                                         r = future.result()
                                         if r: results.append(r)
+
+                                st.toast(f"Fetched data from {len(results)} games")
 
                                 for session, plays_raw, balls_raw in results:
                                     ht = session.get("homeTeam", {}).get("name", "")
@@ -1400,21 +1403,28 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                 for pn in season_outings:
                                     season_outings[pn].sort(key=lambda x: x[1])
 
-                                st.session_state[season_cache_key] = season_outings
+                                st.toast(f"Found {len(season_outings)} pitchers in season data")
+
+                            # Always write to cache, even if empty
+                            st.session_state[season_cache_key] = season_outings
 
                         season_outings = st.session_state.get(season_cache_key, {})
 
-                        # Generate summaries for selected pitchers
-                        season_start_date = date(2026, 1, 1)
-                        season_end_date = date.today()
-                        for pname in selected_names:
-                            if pname not in season_outings:
-                                st.warning(f"No season data found for {pname}")
-                                continue
-                            outings = season_outings[pname]
-                            fig = generate_season_summary(pname, outings, season_start_date, season_end_date)
-                            if fig:
-                                figures.append((pname, fig))
+                        if not season_outings:
+                            st.error(f"No season data found for {team_name}. Try clicking Refresh in the sidebar and try again.")
+                        else:
+                            # Generate summaries for selected pitchers
+                            season_start_date = date(2026, 1, 1)
+                            season_end_date = date.today()
+                            for pname in selected_names:
+                                if pname not in season_outings:
+                                    # Show available pitchers to help debug
+                                    st.warning(f"No season data for {pname}. Available: {', '.join(list(season_outings.keys())[:10])}")
+                                    continue
+                                outings = season_outings[pname]
+                                fig = generate_season_summary(pname, outings, season_start_date, season_end_date)
+                                if fig:
+                                    figures.append((pname, fig))
 
                     if figures:
                         for label, fig in figures:
@@ -1826,4 +1836,3 @@ if "selected_team" in st.session_state:
                             st.write(size_data)
 else:
     st.info("Select a team above to use Pitch Mix")
-
