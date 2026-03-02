@@ -229,8 +229,6 @@ def calc_ip(pd_):
         if pd.notna(oop) and oop > 0:
             total += int(oop)
         elif korbb == "Strikeout":
-            # Dropped 3rd strike: batter reaches — no out recorded
-            # If PlayResult indicates batter reached base, skip
             reached = result in ("Single", "Double", "Triple", "HomeRun",
                                  "Error", "FieldersChoice", "CaughtStealing",
                                  "ReachedOnError")
@@ -248,7 +246,6 @@ def calc_er(pd_):
         rs = last["RunsScored"]
         if pd.notna(rs) and rs > 0:
             total += int(rs)
-        # Also count solo HR where RunsScored might be 0 due to data quirk
         elif last["PlayResult"] == "HomeRun":
             total += 1
     return total
@@ -720,7 +717,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ip_full = total_ip_outs // 3; ip_rem = total_ip_outs % 3
     ip_str = f"{ip_full}.{ip_rem}"
     ip_float = ip_full + ip_rem / 3.0
-    whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0  # H includes HR
+    whip = ((total_bb + total_hits + total_hr) / ip_float) if ip_float > 0 else 0
     k_pct = (total_k / total_pa * 100) if total_pa > 0 else 0
     bb_pct = (total_bb / total_pa * 100) if total_pa > 0 else 0
     fip = calc_fip(total_k, total_bb, total_hbp, total_hr, ip_str)
@@ -752,7 +749,6 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     # ---- Row 1: Season stats banner ----
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
 
-    # Build per-outing detail string
     outing_details = []
     for p_df, gdate, opp in outings:
         o_ip = calc_ip(p_df)
@@ -829,7 +825,6 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     for i, pt in enumerate(bar_pts):
         lhb_pct = len(lhb_data[lhb_data["PitchType"] == pt]) / lhb_total * 100 if lhb_total > 0 else 0
         rhb_pct = len(rhb_data[rhb_data["PitchType"] == pt]) / rhb_total * 100 if rhb_total > 0 else 0
-        # LHB bars go left (negative), RHB go right (positive)
         ax_usage.barh(i + bar_h / 2, -lhb_pct, bar_h, color=pc(pt), alpha=0.8, edgecolor="black", lw=0.3)
         ax_usage.barh(i - bar_h / 2, rhb_pct, bar_h, color=pc(pt), alpha=0.8, edgecolor="black", lw=0.3)
         if lhb_pct > 2:
@@ -958,14 +953,11 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
 # ===========================================================================
 # HEATMAP FUNCTIONS
 # ===========================================================================
-# Run value mapping for pitch outcomes (from pitcher perspective, negative = good for pitcher)
 RUN_VALUES = {
     "StrikeSwinging": -0.065, "StrikeCalled": -0.038, "FoulBallNotFieldable": -0.025,
     "BallCalled": 0.032, "BallinDirt": 0.032, "BallIntentional": 0.032,
     "HitByPitch": 0.035,
 }
-# For InPlay: use xwOBA converted to run value scale (approx wOBA/1.15 - league_avg_rv)
-# We'll compute per-pitch run values on the fly
 
 def compute_pitch_run_value(row):
     """Estimate per-pitch run value. Negative = good for pitcher."""
@@ -975,15 +967,14 @@ def compute_pitch_run_value(row):
     if call == "InPlay":
         xw = row.get("xwOBA", np.nan)
         if pd.notna(xw):
-            # Convert xwOBA to run value scale: (xwOBA - league_avg) / scale
-            return (xw - 0.320) / 1.15  # ~centered around 0
+            return (xw - 0.320) / 1.15
         return 0.0
     return 0.0
 
 def generate_heatmap(p, pitch_type, metric="run_value"):
     """
     Generate a side-by-side heatmap (LHB / RHB) for a given pitch type.
-    metric: 'run_value', 'whiff', or 'xwoba'
+    metric: 'run_value', 'whiff', 'xwoba', or 'location'
     Returns a matplotlib Figure.
     """
     sub = p[p["PitchType"] == pitch_type].copy()
@@ -991,17 +982,15 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
     if len(sub) < 5:
         return None
 
-    # Compute metric values per pitch
     is_density_only = False
     if metric == "location":
-        # Pure density heatmap — no per-pitch value needed
         is_density_only = True
         cmap_name = "YlOrRd"
         title_label = "Pitch Location Density"
-        vmin, vmax = 0, 1  # will be normalized
+        vmin, vmax = 0, 1
     elif metric == "run_value":
         sub["_val"] = sub.apply(compute_pitch_run_value, axis=1)
-        cmap_name = "RdBu_r"  # red=bad for pitcher, blue=good
+        cmap_name = "RdBu_r"
         title_label = "Run Value"
         vmin, vmax = -0.08, 0.08
     elif metric == "whiff":
@@ -1010,7 +999,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
         title_label = "Whiff Rate"
         vmin, vmax = 0, 0.6
     elif metric == "xwoba":
-        # Only BIP pitches have xwOBA; for non-BIP assign outcome-based values
         def xw_val(row):
             if row["PitchCall"] == "InPlay" and pd.notna(row.get("xwOBA")):
                 return row["xwOBA"]
@@ -1019,11 +1007,11 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
             elif row["PitchCall"] == "StrikeCalled":
                 return 0.05
             elif row["PitchCall"] in ("BallCalled", "BallinDirt"):
-                return 0.4  # neutral-ish
+                return 0.4
             return np.nan
         sub["_val"] = sub.apply(xw_val, axis=1)
         sub = sub[sub["_val"].notna()]
-        cmap_name = "RdYlBu_r"  # red=high xwOBA (bad for pitcher)
+        cmap_name = "RdYlBu_r"
         title_label = "xwOBA"
         vmin, vmax = 0, 0.8
     else:
@@ -1036,7 +1024,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
         ax.set_facecolor(PANEL_COLOR)
         side_data = sub[sub["BatterSide"] == side]
 
-        # Draw zone
         ax.add_patch(Rectangle((-0.95, 1.6), 1.9, 1.9, fill=False, ec="black", lw=1.5, zorder=10))
         ax.add_patch(Polygon([(-.708, .15), (.708, .15), (.708, .35), (0, .55), (-.708, .35)],
                              closed=True, fc="#CCCCCC", ec="black", lw=.5, alpha=0.5, zorder=10))
@@ -1045,7 +1032,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
             x = side_data["PlateLocSide"].values
             y = side_data["PlateLocHeight"].values
 
-            # Create grid
             xi = np.linspace(-2.5, 2.5, 80)
             yi = np.linspace(-0.5, 5.0, 80)
             Xi, Yi = np.meshgrid(xi, yi)
@@ -1056,14 +1042,12 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
                 density = kde(np.vstack([Xi.ravel(), Yi.ravel()])).reshape(Xi.shape)
 
                 if is_density_only:
-                    # Pure density — normalize to 0-1
                     Zi = density / density.max() if density.max() > 0 else density
                     density_thresh = 0.05
                     Zi[Zi < density_thresh] = np.nan
                 else:
                     vals = side_data["_val"].values
 
-                    # Weighted value surface
                     Zi = np.zeros_like(Xi)
                     for px, py, pv in zip(x, y, vals):
                         dist2 = (Xi - px) ** 2 + (Yi - py) ** 2
@@ -1076,7 +1060,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
                     weight_sum[weight_sum == 0] = 1
                     Zi = Zi / weight_sum
 
-                    # Mask low-density areas
                     density_thresh = density.max() * 0.05
                     Zi[density < density_thresh] = np.nan
 
@@ -1085,7 +1068,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
             except:
                 pass
 
-            # Scatter actual pitch locations
             ax.scatter(x, y, c="black", s=8, alpha=0.5, zorder=6)
 
         n_side = len(side_data)
@@ -1097,7 +1079,6 @@ def generate_heatmap(p, pitch_type, metric="run_value"):
         ax.tick_params(labelsize=7, colors=MUTED_TEXT)
         for sp in ax.spines.values(): sp.set_color(GRID_COLOR)
 
-    # Colorbar
     fig.subplots_adjust(right=0.88)
     cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
     sm = plt.cm.ScalarMappable(cmap=cmap_name, norm=plt.Normalize(vmin=vmin, vmax=vmax))
@@ -1125,7 +1106,6 @@ def parse_session_date(session, fallback_date):
                 return gdate
             except:
                 pass
-    # Scan all string fields for a date
     for k, v in session.items():
         if isinstance(v, str) and len(v) >= 10:
             try:
@@ -1182,7 +1162,7 @@ with st.sidebar:
             st.session_state.pop(k, None)
         st.rerun()
 
-    # Team dropdown — persist selection, searchable
+    # Team dropdown
     if "teams" in st.session_state and st.session_state["teams"]:
         teams_list = st.session_state["teams"]
         prev_team = st.session_state.get("selected_team", None)
@@ -1216,20 +1196,18 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
     st.subheader(f"{team_name} — {len(team_sessions)} game(s) found")
 
-    # Show game list
     for s in team_sessions:
         ht = s.get("homeTeam", {}).get("name", "")
         at = s.get("awayTeam", {}).get("name", "")
         gd = parse_session_date(s, date_from)
         st.text(f"  📅 {gd} — {ht} vs {at}")
 
-    # Load pitcher NAMES only (lightweight — just plays, no balls)
+    # Load pitcher NAMES only
     if "pitcher_outings_meta" not in st.session_state or st.session_state.get("_team_key") != team_name:
         with st.spinner("Finding pitchers..."):
             pitcher_meta = {}
 
             def fetch_plays_only(session):
-                """Fetch just plays for one session (no balls)."""
                 sid = session["sessionId"]
                 headers = get_headers()
                 if not headers: return None
@@ -1242,7 +1220,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 except:
                     return None
 
-            # Parallel fetch all sessions at once
             with ThreadPoolExecutor(max_workers=8) as executor:
                 futures = {executor.submit(fetch_plays_only, s): s for s in team_sessions}
                 for future in as_completed(futures):
@@ -1255,7 +1232,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                     opp = at if team_name.lower() in ht.lower() else (ht if team_name.lower() in at.lower() else "Opponent")
                     gdate = parse_session_date(session, date_from)
 
-                    # Quick pitcher discovery from plays only
                     pitcher_teams = {}
                     for p in plays_raw:
                         pname = sg(p, "pitcher", "name", default="")
@@ -1286,7 +1262,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
             st.session_state["pitcher_outings_meta"] = pitcher_meta
             st.session_state["pitcher_names"] = sorted(pitcher_meta.keys())
             st.session_state["_team_key"] = team_name
-            # Clear any previously loaded full data
             st.session_state.pop("pitcher_outings", None)
 
     # Pitcher selection
@@ -1309,28 +1284,24 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
         selected_names = [label_to_name[lbl] for lbl in selected_labels]
 
         if selected_names:
-            # ========== TABS ==========
             tab_reports, tab_summary, tab_heatmaps, tab_debug = st.tabs(
                 ["📄 Game Reports", "📊 Season Summary", "🔥 Heatmaps", "🔧 Debug"])
 
             def load_full_pitcher_data(pitcher_names_to_load):
-                """Load full play+ball data for selected pitchers. Caches in session_state."""
                 if "pitcher_outings" not in st.session_state:
                     st.session_state["pitcher_outings"] = {}
 
                 needed = [pn for pn in pitcher_names_to_load if pn not in st.session_state["pitcher_outings"]]
                 if not needed:
-                    return  # All already loaded
+                    return
 
-                # Gather which sessions we need
-                sessions_to_fetch = {}  # sid -> (session, gdate, opp)
+                sessions_to_fetch = {}
                 for pn in needed:
                     for session, gdate, opp in st.session_state["pitcher_outings_meta"][pn]:
                         sid = session["sessionId"]
                         if sid not in sessions_to_fetch:
                             sessions_to_fetch[sid] = (session, gdate, opp)
 
-                # Parallel fetch all sessions
                 def fetch_one_session(sid_info):
                     sid, (session, gdate, opp) = sid_info
                     plays_raw, balls_raw = fetch_game_data(sid)
@@ -1345,7 +1316,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         r = future.result()
                         if r: results.append(r)
 
-                # Process results
                 for sid, session, gdate, opp, plays_raw, balls_raw in results:
                     ht = session.get("homeTeam", {}).get("name", "")
                     at = session.get("awayTeam", {}).get("name", "")
@@ -1370,7 +1340,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                 st.session_state["pitcher_outings"][pn] = []
                             st.session_state["pitcher_outings"][pn].append((p_df, gdate, opp))
 
-                # Sort outings by date
                 for pn in needed:
                     if pn in st.session_state["pitcher_outings"]:
                         st.session_state["pitcher_outings"][pn].sort(key=lambda x: x[1])
@@ -1415,7 +1384,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         season_cache_key = f"_season_outings_{team_name}"
 
                         if season_cache_key not in st.session_state:
-                            # Fetch season in monthly chunks to avoid API limits
                             all_season_sessions = []
                             chunk_start = date(2026, 1, 1)
                             today = date.today()
@@ -1428,7 +1396,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                     all_season_sessions.extend(chunk_sessions)
                                 chunk_start = chunk_end
 
-                            # Deduplicate by sessionId
                             seen_ids = set()
                             unique_sessions = []
                             for s in all_season_sessions:
@@ -1525,13 +1492,11 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                 else:
                     hm_pitcher = st.selectbox("Select pitcher for heatmaps", selected_names, key="hm_pitcher")
 
-                # Load data button
                 if st.button("📂 Load Pitch Data", type="primary", use_container_width=True, key="btn_load_hm"):
                     with st.spinner("Fetching pitch data..."):
                         load_full_pitcher_data([hm_pitcher])
                     st.session_state["_hm_loaded"] = hm_pitcher
 
-                # Show controls if data is loaded
                 if (st.session_state.get("_hm_loaded") == hm_pitcher and
                     hm_pitcher in st.session_state.get("pitcher_outings", {})):
 
@@ -1563,7 +1528,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                                 else:
                                     st.warning(f"Not enough {hm_pitch_type} data for heatmap")
 
-                            # Persist download button across reruns
                             if st.session_state.get("_hm_fig_bytes"):
                                 st.download_button(
                                     f"📥 Download Heatmap",
@@ -1592,7 +1556,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         for p_df, gdate, opp in st.session_state["pitcher_outings"][pname]:
                             st.write(f"**{gdate} vs {opp}** — {len(p_df)} pitches")
 
-                            # Show PA-by-PA breakdown
                             pa_rows = []
                             debug_outs = 0
                             reached_results = ("Single", "Double", "Triple", "HomeRun",
@@ -1629,7 +1592,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                             pa_table = pd.DataFrame(pa_rows)
                             st.dataframe(pa_table, use_container_width=True, hide_index=True)
 
-                            # Computed stats
                             ip_s = calc_ip(p_df)
                             er_s = calc_er(p_df)
                             pa_s = calc_pa(p_df)
@@ -1637,7 +1599,6 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                             bb_s = int((p_df["KorBB"] == "Walk").sum())
                             st.write(f"**Computed:** IP={ip_s}, ER={er_s}, PA={pa_s}, K={k_s}, BB={bb_s}, Debug outs total={debug_outs}")
 
-                            # Show raw OutsOnPlay and RunsScored distributions
                             st.write("**Raw OutsOnPlay values in data:**", p_df["OutsOnPlay"].value_counts().to_dict())
                             st.write("**Raw RunsScored values in data:**", p_df["RunsScored"].value_counts().to_dict())
                             st.divider()
@@ -1656,14 +1617,12 @@ st.title("🎯 Pitch Mix Analysis")
 if "selected_team" in st.session_state:
     pm_team = st.session_state["selected_team"]
 
-    # Date range
     pm_col1, pm_col2 = st.columns(2)
     with pm_col1:
         pm_from = st.date_input("From", value=date(2026, 1, 1), key="pm_from")
     with pm_col2:
         pm_to = st.date_input("To", value=date.today(), key="pm_to")
 
-    # Load all pitcher names for this team + date range
     pm_cache_key = f"_pm_data_{pm_team}_{pm_from}_{pm_to}"
 
     if st.button("📂 Load Pitchers", type="secondary", use_container_width=True, key="btn_pm_load"):
@@ -1716,7 +1675,6 @@ if "selected_team" in st.session_state:
             st.session_state["_pm_pitchers"] = sorted(pm_all_outings.keys())
             st.session_state["_pm_active_key"] = pm_cache_key
 
-    # Show controls if data loaded
     if st.session_state.get("_pm_active_key") == pm_cache_key and "_pm_pitchers" in st.session_state:
         pm_outings = st.session_state.get(pm_cache_key, {})
 
@@ -1736,7 +1694,6 @@ if "selected_team" in st.session_state:
                 if pm_pitcher not in pm_outings or not pm_outings[pm_pitcher]:
                     st.warning(f"No data found for {pm_pitcher}")
                 else:
-                    # Combine all outings
                     all_dfs = []
                     for p_df, gdate, opp in pm_outings[pm_pitcher]:
                         df_copy = p_df.copy()
@@ -1745,7 +1702,6 @@ if "selected_team" in st.session_state:
                         all_dfs.append(df_copy)
                     pitch_data = pd.concat(all_dfs, ignore_index=True)
 
-                    # Compute TTO per game
                     pitch_data["_TTO"] = 0
                     for gd in pitch_data["_game_date"].unique():
                         game_mask = pitch_data["_game_date"] == gd
@@ -1767,7 +1723,6 @@ if "selected_team" in st.session_state:
                             pa_key = (row["Inning"], row["PAofInning"])
                             pitch_data.loc[idx, "_TTO"] = pa_tto.get(pa_key, 1)
 
-                    # Apply filters
                     filtered = pitch_data.copy()
                     if pm_hand == "vs RHH":
                         filtered = filtered[filtered["BatterSide"] == "Right"]
@@ -1818,7 +1773,6 @@ if "selected_team" in st.session_state:
                             "Two Strikes": filtered[filtered["_count_cats"].apply(lambda x: "twok" in x)],
                         }
 
-                        # Build table data
                         table_data = []
                         all_counts_pcts = {}
                         for pt in pts:
@@ -1833,13 +1787,11 @@ if "selected_team" in st.session_state:
                                 row_d[sit_name] = pct
                             table_data.append(row_d)
 
-                        # Header
                         hand_label = pm_hand if pm_hand != "All" else "vs All"
                         tto_label = pm_tto if pm_tto != "All" else "All ABs"
                         st.markdown(f"### {pm_pitcher}")
                         st.caption(f"Pitch Mix {hand_label} · {tto_label} · {pm_from} to {pm_to} · {N} pitches")
 
-                        # Dark-themed table
                         fig, ax = plt.subplots(figsize=(14, max(2.5, 0.6 * len(pts) + 1.2)),
                                                facecolor="#1a1d23")
                         ax.axis("off")
@@ -1910,3 +1862,4 @@ if "selected_team" in st.session_state:
                             st.write(size_data)
 else:
     st.info("Select a team above to use Pitch Mix")
+
