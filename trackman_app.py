@@ -401,6 +401,50 @@ def draw_release(ax, data, pts):
     ax.set_aspect("equal")
 
 # ===========================================================================
+# RATE LIMITER — enforces minimum gap between requests (like dad's discogs app)
+# ===========================================================================
+import threading
+_request_lock = threading.Lock()
+_last_request_ts = 0.0
+MIN_SECONDS_PER_REQUEST = 1.5  # ~40 req/min, well under any reasonable limit
+
+def _rate_limit_sleep():
+    global _last_request_ts
+    with _request_lock:
+        now = time.time()
+        elapsed = now - _last_request_ts
+        if elapsed < MIN_SECONDS_PER_REQUEST:
+            time.sleep(MIN_SECONDS_PER_REQUEST - elapsed)
+        _last_request_ts = time.time()
+
+def _get_json(url, headers, method="GET", json_body=None, retries=5):
+    """Single HTTP helper with rate limiting + retry on 429 — adapted from discogs app."""
+    last_status = None
+    for attempt in range(1, retries + 1):
+        try:
+            _rate_limit_sleep()
+            if method == "POST":
+                r = requests.post(url, headers=headers, json=json_body, timeout=30)
+            else:
+                r = requests.get(url, headers=headers, timeout=30)
+            last_status = r.status_code
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 30 * attempt))
+                st.sidebar.warning(f"⏳ Rate limited — waiting {wait}s (attempt {attempt}/{retries})...")
+                time.sleep(wait)
+                continue
+            if r.status_code in (500, 502, 503, 504):
+                time.sleep(2.0 * attempt)
+                continue
+            if r.status_code == 200:
+                return r.json()
+            return None
+        except Exception as e:
+            time.sleep(2.0 * attempt)
+    st.sidebar.error(f"❌ Failed after {retries} retries (last status: {last_status}): {url}")
+    return None
+
+# ===========================================================================
 # API FUNCTIONS (cached)
 # ===========================================================================
 @st.cache_data(ttl=3600)
@@ -430,39 +474,18 @@ def fetch_sessions(date_from_str, date_to_str):
 
     url = f"{BASE_URL}/api/v1/discovery/game/sessions"
     payload = {"sessionType": "All", "utcDateFrom": date_from_str, "utcDateTo": date_to_str}
-
-    for attempt in range(5):
-        try:
-            time.sleep(attempt * 2)  # 0s, 2s, 4s, 6s, 8s between attempts
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        except Exception as e:
-            st.sidebar.error(f"❌ Network error fetching sessions: {e}")
-            return []
-
-        if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 5 * (attempt + 1)))
-            st.sidebar.warning(f"⏳ Rate limited. Waiting {retry_after}s (attempt {attempt+1}/5)...")
-            time.sleep(retry_after)
-            continue
-
-        if resp.status_code != 200:
-            st.sidebar.error(
-                f"❌ Sessions API returned HTTP {resp.status_code}\n\n"
-                f"**URL:** {url}\n\n"
-                f"**Payload sent:** {json.dumps(payload)}\n\n"
-                f"**Response body:** {resp.text[:500]}"
-            )
-            return []
-
-        data = resp.json()
-        if not data:
-            st.sidebar.warning(
-                f"⚠️ API returned an empty list for {date_from_str[:10]} → {date_to_str[:10]}. "
-                f"No games exist in TrackMan for this date range."
-            )
-        else:
-            st.sidebar.success(f"✅ {len(data)} session(s) found for {date_from_str[:10]} → {date_to_str[:10]}")
-        return data
+    data = _get_json(url, headers, method="POST", json_body=payload)
+    if data is None:
+        return []
+    if not data:
+        st.sidebar.warning(
+            f"⚠️ API returned an empty list for {date_from_str[:10]} → {date_to_str[:10]}. "
+            f"No games exist in TrackMan for this date range."
+        )
+    else:
+        disk_cache_set(cache_key, data)
+        st.sidebar.success(f"✅ {len(data)} session(s) found and cached")
+    return data
 
     st.sidebar.error("❌ Rate limited by TrackMan API after 5 retries. Wait a minute and hit Refresh.")
     return []
@@ -476,39 +499,10 @@ def fetch_game_data(session_id):
     headers = get_headers()
     if not headers: return [], []
 
-    for attempt in range(4):
-        try:
-            if attempt > 0:
-                time.sleep(5 * attempt)
-            resp = requests.get(f"{BASE_URL}/api/v1/data/game/plays/{session_id}", headers=headers, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(15 * (attempt + 1))
-                continue
-            if resp.status_code != 200: return [], []
-            plays = resp.json()
-            if not isinstance(plays, list): return [], []
-            break
-        except:
-            return [], []
-    else:
-        return [], []
-
-    for attempt in range(4):
-        try:
-            if attempt > 0:
-                time.sleep(5 * attempt)
-            resp = requests.get(f"{BASE_URL}/api/v1/data/game/balls/{session_id}", headers=headers, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(15 * (attempt + 1))
-                continue
-            if resp.status_code != 200: return plays, []
-            balls = resp.json()
-            break
-        except:
-            return plays, []
-    else:
-        return plays, []
-
+    plays = _get_json(f"{BASE_URL}/api/v1/data/game/plays/{session_id}", headers)
+    if not isinstance(plays, list): return [], []
+    balls = _get_json(f"{BASE_URL}/api/v1/data/game/balls/{session_id}", headers)
+    if not isinstance(balls, list): balls = []
     disk_cache_set(cache_key, {"plays": plays, "balls": balls})
     return plays, balls
 
