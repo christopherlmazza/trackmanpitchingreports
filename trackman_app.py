@@ -61,7 +61,7 @@ try:
         for pt_name in _stuff_scales:
             model_path = os.path.join(_model_dir, f"{pt_name}.json")
             if os.path.exists(model_path):
-                m = xgb.XGBRegressor()
+                m = xgb.Booster()
                 m.load_model(model_path)
                 _stuff_models[pt_name] = m
         _stuff_status = f"✅ Stuff+ loaded: {list(_stuff_models.keys())}"
@@ -82,9 +82,10 @@ def score_stuff_plus(pitch_df, pitch_type):
     if len(sub) < 1:
         return None
     X = sub[STUFF_FEATURES].values
+    dmat = xgb.DMatrix(X, feature_names=STUFF_FEATURES)
     model = _stuff_models[pitch_type]
     scales = _stuff_scales[pitch_type]
-    preds = model.predict(X)
+    preds = model.predict(dmat)
     # Lower predicted run value = better for pitcher = higher Stuff+
     raw_mean = float(np.mean(preds))
     stuff_plus = 100 - ((raw_mean - scales["mean"]) / scales["std"]) * 10
