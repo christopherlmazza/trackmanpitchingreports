@@ -4,6 +4,6 @@ pandas
 numpy
 matplotlib
 scipy
-xgboost==1.7.6 
-
+scikit-learn
+xgboost==2.0.3
 
