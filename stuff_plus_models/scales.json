@@ -1,0 +1,92 @@
+{
+  "Fastball": {
+    "mean": -0.0070788064040243626,
+    "std": 0.01800667494535446,
+    "n_pitches": 15299,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  },
+  "Sinker": {
+    "mean": -0.0072656660340726376,
+    "std": 0.02278340794146061,
+    "n_pitches": 2766,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  },
+  "Cutter": {
+    "mean": -0.0021957645658403635,
+    "std": 0.024545943364501,
+    "n_pitches": 2268,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  },
+  "Slider": {
+    "mean": 0.0009116074070334435,
+    "std": 0.017368970438838005,
+    "n_pitches": 7447,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  },
+  "Curveball": {
+    "mean": 0.002925660228356719,
+    "std": 0.02268068864941597,
+    "n_pitches": 2818,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  },
+  "ChangeUp": {
+    "mean": 0.0029688584618270397,
+    "std": 0.02009613811969757,
+    "n_pitches": 4594,
+    "features": [
+      "RelSpeed",
+      "SpinRate",
+      "InducedVertBreak",
+      "HorzBreak",
+      "Extension",
+      "RelHeight",
+      "RelSide",
+      "VertApprAngle"
+    ]
+  }
+}
