@@ -39,20 +39,39 @@ STUFF_FEATURES = ["RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak",
 
 try:
     import xgboost as xgb
-    scales_path = os.path.join(os.path.dirname(__file__), "stuff_plus_models", "scales.json")
-    if os.path.exists(scales_path):
+    _xgb_ok = True
+    # Try multiple path strategies for finding stuff_plus_models/
+    _script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
+    _model_dirs = [
+        os.path.join(_script_dir, "stuff_plus_models"),
+        os.path.join(os.getcwd(), "stuff_plus_models"),
+        "stuff_plus_models",
+    ]
+    scales_path = None
+    for _md in _model_dirs:
+        _sp = os.path.join(_md, "scales.json")
+        if os.path.exists(_sp):
+            scales_path = _sp
+            _model_dir = _md
+            break
+
+    if scales_path:
         with open(scales_path) as f:
             _stuff_scales = json.load(f)
         for pt_name in _stuff_scales:
-            model_path = os.path.join(os.path.dirname(__file__), "stuff_plus_models", f"{pt_name}.json")
+            model_path = os.path.join(_model_dir, f"{pt_name}.json")
             if os.path.exists(model_path):
                 m = xgb.XGBRegressor()
                 m.load_model(model_path)
                 _stuff_models[pt_name] = m
-        if _stuff_models:
-            print(f"Stuff+ loaded: {list(_stuff_models.keys())}")
+        _stuff_status = f"✅ Stuff+ loaded: {list(_stuff_models.keys())}"
+    else:
+        _stuff_status = f"❌ scales.json not found. Searched: {_model_dirs}"
+except ImportError:
+    _xgb_ok = False
+    _stuff_status = "❌ xgboost not installed"
 except Exception as e:
-    print(f"Stuff+ models not available: {e}")
+    _stuff_status = f"❌ Stuff+ error: {e}"
 
 def score_stuff_plus(pitch_df, pitch_type):
     """Score a set of pitches and return average Stuff+ for that pitch type.
@@ -1123,6 +1142,7 @@ st.title("⚾ TrackMan Pitching Report")
 # Sidebar inputs
 with st.sidebar:
     st.header("Report Settings")
+    st.caption(_stuff_status)
 
     # Date range
     col1, col2 = st.columns(2)
