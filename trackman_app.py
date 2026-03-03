@@ -464,6 +464,12 @@ def get_headers():
 # FETCH SESSIONS — with retry/backoff on 429
 # ===========================================================================
 def fetch_sessions(date_from_str, date_to_str):
+    cache_key = f"sessions_{date_from_str}_{date_to_str}"
+    cached = disk_cache_get(cache_key)
+    if cached is not None:
+        st.sidebar.success(f"✅ {len(cached)} session(s) loaded from cache")
+        return cached
+
     headers = get_headers()
     if not headers:
         st.sidebar.error("❌ Auth failed — no token received. Check CLIENT_ID / CLIENT_SECRET.")
@@ -483,9 +489,6 @@ def fetch_sessions(date_from_str, date_to_str):
         disk_cache_set(cache_key, data)
         st.sidebar.success(f"✅ {len(data)} session(s) found and cached")
     return data
-
-    st.sidebar.error("❌ Rate limited by TrackMan API after 5 retries. Wait a minute and hit Refresh.")
-    return []
 
 def fetch_game_data(session_id):
     cache_key = f"gamedata_{session_id}"
@@ -1250,16 +1253,18 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
 
             def fetch_plays_only(session):
                 sid = session["sessionId"]
+                # Check disk cache first
+                cache_key = f"gamedata_{sid}"
+                cached = disk_cache_get(cache_key)
+                if cached is not None:
+                    plays_raw = cached.get("plays", [])
+                    if isinstance(plays_raw, list) and plays_raw:
+                        return (session, plays_raw)
                 headers = get_headers()
                 if not headers: return None
-                try:
-                    resp = requests.get(f"{BASE_URL}/api/v1/data/game/plays/{sid}", headers=headers)
-                    if resp.status_code != 200: return None
-                    plays_raw = resp.json()
-                    if not isinstance(plays_raw, list): return None
-                    return (session, plays_raw)
-                except:
-                    return None
+                plays_raw = _get_json(f"{BASE_URL}/api/v1/data/game/plays/{sid}", headers)
+                if not isinstance(plays_raw, list): return None
+                return (session, plays_raw)
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {executor.submit(fetch_plays_only, s): s for s in team_sessions}
