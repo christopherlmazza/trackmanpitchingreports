@@ -16,7 +16,7 @@ Optional: stuff_plus_models/ folder with XGBoost models + scales.json (for Stuff
 """
 
 import streamlit as st
-import requests, json, os, io, math, warnings
+import requests, json, os, io, math, warnings, time
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -463,9 +463,6 @@ def get_headers():
 # ===========================================================================
 # FETCH SESSIONS — with retry/backoff on 429
 # ===========================================================================
-import time
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_sessions(date_from_str, date_to_str):
     headers = get_headers()
     if not headers:
