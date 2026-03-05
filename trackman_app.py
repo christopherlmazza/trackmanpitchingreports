@@ -1,7 +1,7 @@
 """
 TrackMan Pitching Report — Streamlit App
 ==========================================
-Install:   pip install streamlit xgboost
+Install:   pip install streamlit
 Run with:  streamlit run trackman_app.py
 
 Flow:
@@ -12,7 +12,6 @@ Flow:
   5. Preview in browser + PDF download button
 
 Requires: D1_percentiles.json in same folder (for color grading)
-Optional: stuff_plus_models/ folder with XGBoost models + scales.json (for Stuff+ column)
 """
 
 import streamlit as st
@@ -59,61 +58,7 @@ def disk_cache_set(key, data):
     except:
         pass
 
-# ---- Stuff+ Model (optional) ----
-_stuff_models = {}   # {pitch_type: xgb model}
-_stuff_scales = {}   # {pitch_type: {"mean": ..., "std": ...}}
-STUFF_FEATURES = ["RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak",
-                  "Extension", "RelHeight", "RelSide", "VertApprAngle"]
 
-try:
-    import xgboost as xgb
-    _xgb_ok = True
-    _script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
-    _model_dirs = [
-        os.path.join(_script_dir, "stuff_plus_models"),
-        os.path.join(os.getcwd(), "stuff_plus_models"),
-        "stuff_plus_models",
-    ]
-    scales_path = None
-    for _md in _model_dirs:
-        _sp = os.path.join(_md, "scales.json")
-        if os.path.exists(_sp):
-            scales_path = _sp
-            _model_dir = _md
-            break
-
-    if scales_path:
-        with open(scales_path) as f:
-            _stuff_scales = json.load(f)
-        for pt_name in _stuff_scales:
-            model_path = os.path.join(_model_dir, f"{pt_name}.json")
-            if os.path.exists(model_path):
-                m = xgb.Booster()
-                m.load_model(model_path)
-                _stuff_models[pt_name] = m
-        _stuff_status = f"✅ Stuff+ loaded: {list(_stuff_models.keys())}"
-    else:
-        _stuff_status = f"❌ scales.json not found. Searched: {_model_dirs}"
-except ImportError:
-    _xgb_ok = False
-    _stuff_status = "❌ xgboost not installed"
-except Exception as e:
-    _stuff_status = f"❌ Stuff+ error: {e}"
-
-def score_stuff_plus(pitch_df, pitch_type):
-    if pitch_type not in _stuff_models or pitch_type not in _stuff_scales:
-        return None
-    sub = pitch_df.dropna(subset=STUFF_FEATURES)
-    if len(sub) < 1:
-        return None
-    X = sub[STUFF_FEATURES].values
-    dmat = xgb.DMatrix(X, feature_names=STUFF_FEATURES)
-    model = _stuff_models[pitch_type]
-    scales = _stuff_scales[pitch_type]
-    preds = model.predict(dmat)
-    raw_mean = float(np.mean(preds))
-    stuff_plus = 100 - ((raw_mean - scales["mean"]) / scales["std"]) * 10
-    return round(stuff_plus, 1)
 
 # ===========================================================================
 # PAGE CONFIG
@@ -682,10 +627,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
         avg_velo_val = avg_velo_raw.mean() if not avg_velo_raw.empty else None
         zone_val = s_iz.sum() / n * 100 if n else None
         zone_str = f"{zone_val:.1f}%" if zone_val is not None else "—"
-        stuff_val = score_stuff_plus(s, pt)
-        stuff_str = f"{stuff_val:.0f}" if stuff_val is not None else "—"
-
-        trows.append([pt, n, f"{n / N * 100:.1f}%", stuff_str,
+        trows.append([pt, n, f"{n / N * 100:.1f}%",
                       fmt(s["RelSpeed"]), fmt(s["RelSpeed"], "max"),
                       fmt(s["SpinRate"], d=0),
                       fmt(s["InducedVertBreak"]), fmt(s["HorzBreak"]),
@@ -713,7 +655,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
                   fmt(p["Extension"]), "—", "—", "—",
                   all_xwoba, f"{zpct}%", all_whiff, f"{cpct}%", f"{izwp}%"])
 
-    cols = ["Count", "Usage%", "Stuff+", "Avg\nVelo", "Max\nVelo", "Avg\nSpin",
+    cols = ["Count", "Usage%", "Avg\nVelo", "Max\nVelo", "Avg\nSpin",
             "IVB", "HB", "Ext", "RelH", "RelS", "VAA",
             "xwOBA", "Zone%", "Whiff%", "Chase%", "IZ\nWhiff%"]
 
@@ -939,10 +881,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
         avg_velo_val = avg_velo_raw.mean() if not avg_velo_raw.empty else None
         zone_val = s_iz.sum() / n * 100 if n else None
         zone_str = f"{zone_val:.1f}%" if zone_val is not None else "—"
-        stuff_val = score_stuff_plus(s, pt)
-        stuff_str = f"{stuff_val:.0f}" if stuff_val is not None else "—"
-
-        trows.append([pt, n, f"{n / N * 100:.1f}%", stuff_str,
+        trows.append([pt, n, f"{n / N * 100:.1f}%",
                       fmt(s["RelSpeed"]), fmt(s["RelSpeed"], "max"),
                       fmt(s["SpinRate"], d=0),
                       fmt(s["InducedVertBreak"]), fmt(s["HorzBreak"]),
@@ -970,7 +909,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
                   fmt(p["Extension"]), "—", "—", "—",
                   all_xwoba, f"{zpct}%", all_whiff, f"{cpct}%", f"{izwp}%"])
 
-    cols = ["Count", "Usage%", "Stuff+", "Avg\nVelo", "Max\nVelo", "Avg\nSpin",
+    cols = ["Count", "Usage%", "Avg\nVelo", "Max\nVelo", "Avg\nSpin",
             "IVB", "HB", "Ext", "RelH", "RelS", "VAA",
             "xwOBA", "Zone%", "Whiff%", "Chase%", "IZ\nWhiff%"]
     tbl = ax_t.table(cellText=[r[1:] for r in trows], rowLabels=[r[0] for r in trows],
@@ -1160,8 +1099,6 @@ st.title("⚾ TrackMan Pitching Report")
 
 with st.sidebar:
     st.header("Report Settings")
-    st.caption(_stuff_status)
-
     col1, col2 = st.columns(2)
     with col1:
         date_from = st.date_input("From", value=date.today() - timedelta(days=7))
@@ -1423,10 +1360,10 @@ if "sessions" in st.session_state and "selected_team" in st.session_state:
                         season_cache_key = f"_season_outings_{team_name}"
                         if season_cache_key not in st.session_state:
                             all_season_sessions = []
-                            chunk_start = date(2026, 1, 1)
+                            chunk_start = date(2026, 2, 1)
                             today = date.today()
                             while chunk_start <= today:
-                                chunk_end = min(chunk_start + timedelta(days=31), today + timedelta(days=1))
+                                chunk_end = min(chunk_start + timedelta(days=14), today + timedelta(days=1))
                                 cs = f"{chunk_start}T00:00:00Z"
                                 ce = f"{chunk_end}T00:00:00Z"
                                 chunk_sessions = fetch_sessions(cs, ce)
