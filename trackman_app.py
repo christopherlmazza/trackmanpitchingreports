@@ -336,6 +336,21 @@ def get_last_updated():
     with open(ts_path) as f:
         return json.load(f).get("last_updated_date", "unknown")
 
+def build_team_code_map(df):
+    """Build a mapping from full team name (HomeTeam/AwayTeam) to PitcherTeam code."""
+    mapping = {}
+    for _, row in df[["HomeTeam", "AwayTeam", "PitcherTeam"]].dropna().iterrows():
+        home = row["HomeTeam"]
+        away = row["AwayTeam"]
+        code = row["PitcherTeam"]
+        # We can only map the pitcher's own team code
+        # So we check both home/away against the code prefix
+        code_prefix = code[:3].upper()
+        for team in [home, away]:
+            if team and team[:3].upper() == code_prefix:
+                mapping[team] = code
+    return mapping
+
 def get_teams(df):
     teams = set()
     for col in ["HomeTeam", "AwayTeam"]:
@@ -345,8 +360,14 @@ def get_teams(df):
 
 def get_team_pitches(df, team_name, date_from, date_to):
     """Filter to pitches thrown by pitchers on the selected team in the date range."""
+    # Build a set of all PitcherTeam codes that correspond to this full team name
+    # by matching rows where HomeTeam or AwayTeam == team_name
+    team_rows = df[(df["HomeTeam"] == team_name) | (df["AwayTeam"] == team_name)]
+    team_codes = set(team_rows["PitcherTeam"].dropna().unique())
+    if not team_codes:
+        return df.iloc[0:0].copy()
     mask = (
-        (df["PitcherTeam"].str.lower() == team_name.lower()) &
+        df["PitcherTeam"].isin(team_codes) &
         (df["GameDate"] >= date_from) &
         (df["GameDate"] <= date_to)
     )
