@@ -360,18 +360,17 @@ def get_teams(df):
 
 def get_team_pitches(df, team_name, date_from, date_to):
     """Filter to pitches thrown by pitchers on the selected team in the date range."""
-    # Build a set of all PitcherTeam codes that correspond to this full team name
-    # by matching rows where HomeTeam or AwayTeam == team_name
-    team_rows = df[(df["HomeTeam"] == team_name) | (df["AwayTeam"] == team_name)]
-    team_codes = set(team_rows["PitcherTeam"].dropna().unique())
-    if not team_codes:
-        return df.iloc[0:0].copy()
-    mask = (
-        df["PitcherTeam"].isin(team_codes) &
-        (df["GameDate"] >= date_from) &
-        (df["GameDate"] <= date_to)
+    # TopBottom == "Top" means away team is batting → home team is pitching
+    # TopBottom == "Bottom" means home team is batting → away team is pitching
+    # So: home team pitches when TopBottom == "Top"
+    #     away team pitches when TopBottom == "Bottom"
+    date_mask = (df["GameDate"] >= date_from) & (df["GameDate"] <= date_to)
+    mask = date_mask & (
+        ((df["HomeTeam"] == team_name) & (df["TopBottom"] == "Top")) |
+        ((df["AwayTeam"] == team_name) & (df["TopBottom"] == "Bottom"))
     )
     return df[mask].copy()
+
 
 def flatten_game(plays_raw, balls_raw):
     rows = []
