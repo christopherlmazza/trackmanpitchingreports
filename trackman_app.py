@@ -477,27 +477,27 @@ def generate_pitcher_page(p, pname, gdate, opp):
 
     pts = p["PitchType"].value_counts().index.tolist()
 
-    fig = plt.figure(figsize=(17, 10), facecolor=BG_COLOR)
+    fig = plt.figure(figsize=(20, 12), facecolor=BG_COLOR)
     gs = GridSpec(4, 4, figure=fig,
-                  height_ratios=[.07, .03, .46, .44],
+                  height_ratios=[.06, .02, .42, .50],
                   width_ratios=[1, 1, 1, 0.65],
-                  hspace=.20, wspace=.20,
-                  top=0.95, bottom=0.03, left=0.04, right=0.96)
+                  hspace=.18, wspace=.18,
+                  top=0.96, bottom=0.02, left=0.03, right=0.97)
 
     ax = fig.add_subplot(gs[0, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
-    ax.text(.5, .75, pname.upper(), ha="center", va="center", fontsize=22,
+    ax.text(.5, .78, pname.upper(), ha="center", va="center", fontsize=28,
             fontweight="bold", color=TEXT_COLOR, family="monospace")
-    ax.text(.5, .25, f"{gdate:%B %d, %Y}   ·   vs {opp}",
-            ha="center", va="center", fontsize=11, color=ACCENT_COLOR, family="monospace")
+    ax.text(.5, .22, f"{gdate:%B %d, %Y}   ·   vs {opp}",
+            ha="center", va="center", fontsize=14, color=ACCENT_COLOR, family="monospace")
 
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
     stats_str = (f"IP {ip}   ·   PA {pa}   ·   P {N}   ·   "
                  f"H {hits + hr}   ·   K {k}   ·   BB {bb}   ·   HBP {hbp}   ·   HR {hr}   ·   "
                  f"STR% {spct}%")
-    ax.text(.5, .6, stats_str, ha="center", va="center", fontsize=9,
-            color=TEXT_COLOR, family="monospace")
+    ax.text(.5, .65, stats_str, ha="center", va="center", fontsize=11,
+            color=TEXT_COLOR, family="monospace", fontweight="bold")
     legend_str = "○ Ball    ● Called Strike    ✕ Swinging Strike    ▲ Foul    ■ In Play"
-    ax.text(.5, .05, legend_str, ha="center", va="center", fontsize=7,
+    ax.text(.5, .05, legend_str, ha="center", va="center", fontsize=9,
             color=TEXT_COLOR, family="monospace")
 
     lhb = p[p["BatterSide"] == "Left"]
@@ -564,21 +564,23 @@ def generate_pitcher_page(p, pname, gdate, opp):
 
     tbl = ax_t.table(cellText=[r[1:] for r in trows], rowLabels=[r[0] for r in trows],
                      colLabels=cols, loc="center", cellLoc="center")
-    tbl.auto_set_font_size(False); tbl.set_fontsize(7); tbl.scale(1, 1.4)
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9.5)
+    tbl.scale(1, 2.2)
 
     for (row, col), cell in tbl.get_celld().items():
-        cell.set_edgecolor(GRID_COLOR); cell.set_linewidth(0.5)
+        cell.set_edgecolor(GRID_COLOR); cell.set_linewidth(0.6)
         if row == 0:
-            cell.set_facecolor("#2E2E2E")
-            cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=6.5)
+            cell.set_facecolor("#1E1E2E")
+            cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=9)
         elif col == -1:
             pitch_name = cell.get_text().get_text()
             if pitch_name == "All":
-                cell.set_facecolor("#F0F0F0")
-                cell.set_text_props(fontweight="bold", color=TEXT_COLOR, fontfamily="monospace")
+                cell.set_facecolor("#E8E8E8")
+                cell.set_text_props(fontweight="bold", color=TEXT_COLOR, fontfamily="monospace", fontsize=10)
             else:
                 cell.set_facecolor(pc(pitch_name))
-                cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace")
+                cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=10)
         else:
             graded = False
             if (row, col) in grade_cells and row <= len(pts):
@@ -586,18 +588,18 @@ def generate_pitcher_page(p, pname, gdate, opp):
                 gc = grade_color(pt_name, stat_name, raw_val, higher_better)
                 if gc is not None:
                     cell.set_facecolor(gc)
-                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace", fontweight="bold")
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace", fontweight="bold", fontsize=9.5)
                     graded = True
             if not graded:
                 if row == len(trows):
-                    cell.set_facecolor("#F0F0F0")
-                    cell.set_text_props(color=TEXT_COLOR, fontweight="bold", fontfamily="monospace")
+                    cell.set_facecolor("#E8E8E8")
+                    cell.set_text_props(color=TEXT_COLOR, fontweight="bold", fontfamily="monospace", fontsize=9.5)
                 elif row % 2 == 0:
-                    cell.set_facecolor("#F7F8FA")
-                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace")
+                    cell.set_facecolor("#F4F6F9")
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace", fontsize=9.5)
                 else:
                     cell.set_facecolor("#FFFFFF")
-                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace")
+                    cell.set_text_props(color=TEXT_COLOR, fontfamily="monospace", fontsize=9.5)
 
     return fig
 
@@ -652,18 +654,18 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     izwp = round(iz_wh_ct / iz_sw * 100, 1) if iz_sw else 0
     pts = p["PitchType"].value_counts().index.tolist()
 
-    fig = plt.figure(figsize=(17, 11), facecolor=BG_COLOR)
+    fig = plt.figure(figsize=(20, 13), facecolor=BG_COLOR)
     gs = GridSpec(4, 3, figure=fig,
-                  height_ratios=[.06, .04, .38, .52],
+                  height_ratios=[.06, .04, .36, .54],
                   width_ratios=[1, 1.2, 1.2],
-                  hspace=.25, wspace=.25,
-                  top=0.96, bottom=0.03, left=0.05, right=0.96)
+                  hspace=.22, wspace=.22,
+                  top=0.96, bottom=0.02, left=0.04, right=0.97)
 
     ax = fig.add_subplot(gs[0, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
-    ax.text(.5, .7, pitcher_name.upper(), ha="center", va="center", fontsize=22,
+    ax.text(.5, .7, pitcher_name.upper(), ha="center", va="center", fontsize=28,
             fontweight="bold", color=TEXT_COLOR, family="monospace")
     ax.text(.5, .1, "Season Pitching Summary", ha="center", va="center",
-            fontsize=12, color=ACCENT_COLOR, family="monospace")
+            fontsize=14, color=ACCENT_COLOR, family="monospace")
 
     ax = fig.add_subplot(gs[1, :]); ax.set_facecolor(BG_COLOR); ax.axis("off")
     outing_details = []
@@ -677,9 +679,9 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
               f"K% {k_pct:.1f}%   ·   BB% {bb_pct:.1f}%   ·   K-BB% {k_pct - bb_pct:.1f}%   ·   "
               f"PA {total_pa}   ·   P {N}   ·   H {total_hits + total_hr}   ·   HR {total_hr}   ·   "
               f"K {total_k}   ·   BB {total_bb}   ·   {len(outings)} outing(s)")
-    ax.text(.5, .7, banner, ha="center", va="center", fontsize=8.5, color=TEXT_COLOR, family="monospace")
+    ax.text(.5, .7, banner, ha="center", va="center", fontsize=11, color=TEXT_COLOR, family="monospace", fontweight="bold")
     ax.text(.5, .2, f"{date_from} to {date_to}     |     " + "  /  ".join(outing_details),
-            ha="center", va="center", fontsize=6.5, color=MUTED_TEXT, family="monospace")
+            ha="center", va="center", fontsize=8.5, color=MUTED_TEXT, family="monospace")
 
     ax_velo = fig.add_subplot(gs[2, 0]); ax_velo.set_facecolor(PANEL_COLOR)
     pt_velo_sorted = sorted(pts, key=lambda x: p[p["PitchType"] == x]["RelSpeed"].median()
@@ -700,9 +702,9 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
         except:
             pass
     ax_velo.set_yticks(range(len(pt_velo_sorted)))
-    ax_velo.set_yticklabels(pt_velo_sorted, fontsize=7, fontfamily="monospace")
-    ax_velo.set_xlabel("Velocity (mph)", fontsize=7, color=MUTED_TEXT)
-    ax_velo.set_title("Velocity Distribution", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_velo.set_yticklabels(pt_velo_sorted, fontsize=9, fontfamily="monospace")
+    ax_velo.set_xlabel("Velocity (mph)", fontsize=9, color=MUTED_TEXT)
+    ax_velo.set_title("Velocity Distribution", fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=6)
     ax_velo.tick_params(labelsize=6, colors=MUTED_TEXT)
     for sp in ax_velo.spines.values(): sp.set_color(GRID_COLOR)
 
@@ -718,11 +720,11 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
             ax_mov.scatter(hb.mean(), ivb.mean(), c=pc(pt), label=pt, s=120, alpha=0.95,
                           edgecolors="black", linewidths=1, zorder=5, marker="o")
     ax_mov.set_xlim(-25, 25); ax_mov.set_ylim(-25, 25)
-    ax_mov.set_xlabel("HB (in)", fontsize=7, color=MUTED_TEXT)
-    ax_mov.set_ylabel("IVB (in)", fontsize=7, color=MUTED_TEXT)
-    ax_mov.set_title("Avg Pitch Movement", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_mov.set_xlabel("HB (in)", fontsize=9, color=MUTED_TEXT)
+    ax_mov.set_ylabel("IVB (in)", fontsize=9, color=MUTED_TEXT)
+    ax_mov.set_title("Avg Pitch Movement", fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=6)
     ax_mov.legend(loc="upper center", bbox_to_anchor=(.5, -.06), ncol=min(len(pts), 5),
-                  fontsize=6, frameon=False, labelcolor=TEXT_COLOR)
+                  fontsize=9, frameon=False, labelcolor=TEXT_COLOR)
     ax_mov.tick_params(labelsize=6, colors=MUTED_TEXT)
     for sp in ax_mov.spines.values(): sp.set_color(GRID_COLOR)
 
@@ -745,7 +747,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
             ax_usage.text(rhb_pct / 2, i - bar_h / 2, f"{rhb_pct:.1f}%", ha="center", va="center",
                          fontsize=6, fontweight="bold", color="white")
     ax_usage.set_yticks(y_pos)
-    ax_usage.set_yticklabels(bar_pts, fontsize=7, fontfamily="monospace")
+    ax_usage.set_yticklabels(bar_pts, fontsize=9, fontfamily="monospace")
     ax_usage.axvline(0, color="black", lw=1)
     max_pct = max(60, max(
         [len(lhb_data[lhb_data["PitchType"] == pt]) / max(lhb_total, 1) * 100 for pt in bar_pts] +
@@ -754,10 +756,10 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     ax_usage.set_xlim(-max_pct, max_pct)
     ticks = ax_usage.get_xticks()
     ax_usage.set_xticklabels([f"{abs(t):.0f}%" for t in ticks], fontsize=6)
-    ax_usage.set_title("Pitch Usage", fontsize=9, fontweight="bold", color=TEXT_COLOR, pad=6)
-    ax_usage.text(-max_pct * 0.5, len(bar_pts) + 0.3, f"vs LHB ({lhb_total})", ha="center", fontsize=7,
+    ax_usage.set_title("Pitch Usage", fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=6)
+    ax_usage.text(-max_pct * 0.5, len(bar_pts) + 0.3, f"vs LHB ({lhb_total})", ha="center", fontsize=9,
                  color=MUTED_TEXT, fontweight="bold")
-    ax_usage.text(max_pct * 0.5, len(bar_pts) + 0.3, f"vs RHB ({rhb_total})", ha="center", fontsize=7,
+    ax_usage.text(max_pct * 0.5, len(bar_pts) + 0.3, f"vs RHB ({rhb_total})", ha="center", fontsize=9,
                  color=MUTED_TEXT, fontweight="bold")
     ax_usage.tick_params(labelsize=6, colors=MUTED_TEXT)
     for sp in ax_usage.spines.values(): sp.set_color(GRID_COLOR)
@@ -817,21 +819,23 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
             "xwOBA", "Zone%", "Whiff%", "Chase%", "IZ\nWhiff%"]
     tbl = ax_t.table(cellText=[r[1:] for r in trows], rowLabels=[r[0] for r in trows],
                      colLabels=cols, loc="center", cellLoc="center")
-    tbl.auto_set_font_size(False); tbl.set_fontsize(7); tbl.scale(1, 1.4)
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9.5)
+    tbl.scale(1, 2.2)
 
     for (row, col), cell in tbl.get_celld().items():
-        cell.set_edgecolor(GRID_COLOR); cell.set_linewidth(0.5)
+        cell.set_edgecolor(GRID_COLOR); cell.set_linewidth(0.6)
         if row == 0:
-            cell.set_facecolor("#2E2E2E")
-            cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=6.5)
+            cell.set_facecolor("#1E1E2E")
+            cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=9)
         elif col == -1:
             pitch_name = cell.get_text().get_text()
             if pitch_name == "All":
-                cell.set_facecolor("#F0F0F0")
-                cell.set_text_props(fontweight="bold", color=TEXT_COLOR, fontfamily="monospace")
+                cell.set_facecolor("#E8E8E8")
+                cell.set_text_props(fontweight="bold", color=TEXT_COLOR, fontfamily="monospace", fontsize=10)
             else:
                 cell.set_facecolor(pc(pitch_name))
-                cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace")
+                cell.set_text_props(fontweight="bold", color="white", fontfamily="monospace", fontsize=10)
         else:
             graded = False
             if (row, col) in grade_cells and row <= len(pts):
