@@ -554,7 +554,7 @@ def generate_pitcher_page(p, pname, gdate, opp):
     all_whiff = f"{wh.sum() / all_sw_ct * 100:.1f}%" if all_sw_ct else "0%"
     all_xw = p["xwOBA"].dropna()
     all_xwoba = f"{all_xw.mean():.3f}" if not all_xw.empty else "—"
-    trows.append(["All", N, "100%", "—", "—", "—", "—", "—", "—",
+    trows.append(["All", N, "100%", "—", "—", "—", "—", "—",
                   fmt(p["Extension"]), "—", "—", "—",
                   all_xwoba, f"{zpct}%", all_whiff, f"{cpct}%", f"{izwp}%"])
 
@@ -808,7 +808,7 @@ def generate_season_summary(pitcher_name, outings, date_from, date_to):
     all_whiff = f"{wh.sum() / all_sw_ct * 100:.1f}%" if all_sw_ct else "0%"
     all_xw = p["xwOBA"].dropna()
     all_xwoba = f"{all_xw.mean():.3f}" if not all_xw.empty else "—"
-    trows.append(["All", N, "100%", "—", "—", "—", "—", "—", "—",
+    trows.append(["All", N, "100%", "—", "—", "—", "—", "—",
                   fmt(p["Extension"]), "—", "—", "—",
                   all_xwoba, f"{zpct}%", all_whiff, f"{cpct}%", f"{izwp}%"])
 
