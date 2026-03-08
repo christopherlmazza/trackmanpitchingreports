@@ -1012,70 +1012,61 @@ def parse_session_date(session, fallback_date):
 # AI CHATBOT FUNCTIONS
 # ===========================================================================
 
-def build_data_summary(df):
-    """Build a compact summary of the full parquet for the AI context."""
+def get_df_schema(df):
+    """Return a compact schema description for the AI."""
     lines = []
-    lines.append(f"Dataset: {len(df):,} pitches, {df['GameDate'].nunique()} game dates, {df['Pitcher'].nunique()} pitchers, {df['HomeTeam'].nunique() + df['AwayTeam'].nunique()} teams")
+    lines.append(f"DataFrame 'df' shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
     lines.append(f"Date range: {df['GameDate'].min()} to {df['GameDate'].max()}")
+    lines.append(f"Teams: {df['HomeTeam'].nunique()} unique home teams, {df['AwayTeam'].nunique()} unique away teams")
+    lines.append(f"Pitchers: {df['Pitcher'].nunique()} unique (format: 'Last, First')")
+    lines.append(f"Pitch types: {sorted(df['PitchType'].dropna().unique().tolist())}")
     lines.append("")
-
-    # Team list
-    teams = sorted(set(df["HomeTeam"].dropna().unique()) | set(df["AwayTeam"].dropna().unique()))
-    lines.append(f"Teams ({len(teams)}): {', '.join(teams[:30])}{'...' if len(teams) > 30 else ''}")
+    lines.append("Columns and types:")
+    for col in df.columns:
+        lines.append(f"  {col}: {df[col].dtype} (sample: {df[col].dropna().iloc[0] if not df[col].dropna().empty else 'N/A'})")
     lines.append("")
-
-    # Pitch type distribution
-    pt_counts = df["PitchType"].value_counts()
-    lines.append("Pitch type distribution:")
-    for pt, cnt in pt_counts.items():
-        lines.append(f"  {pt}: {cnt:,} ({cnt/len(df)*100:.1f}%)")
-    lines.append("")
-
-    # Top pitchers by pitch count
-    top_pitchers = df.groupby("Pitcher").agg(
-        Pitches=("PitchType", "count"),
-        Team=("PitcherTeam", "first"),
-        AvgVelo=("RelSpeed", "mean"),
-        Whiff=("PitchCall", lambda x: (x == "StrikeSwinging").sum()),
-        Swings=("PitchCall", lambda x: x.isin(["StrikeSwinging","FoulBall","FoulBallNotFieldable","InPlay"]).sum()),
-    ).reset_index()
-    top_pitchers["WhiffPct"] = (top_pitchers["Whiff"] / top_pitchers["Swings"] * 100).round(1)
-    top_pitchers = top_pitchers.sort_values("Pitches", ascending=False).head(50)
-    lines.append("Top pitchers (by pitch count):")
-    for _, row in top_pitchers.iterrows():
-        lines.append(f"  {row['Pitcher']}: {int(row['Pitches'])} pitches, avg velo {row['AvgVelo']:.1f}, whiff% {row['WhiffPct']:.1f}%")
-    lines.append("")
-
-    # Team-level pitching summary
-    lines.append("Team pitching summaries:")
-    for team in sorted(teams)[:40]:
-        mask = ((df["HomeTeam"] == team) & (df["TopBottom"] == "Top")) |                ((df["AwayTeam"] == team) & (df["TopBottom"] == "Bottom"))
-        tdf = df[mask]
-        if len(tdf) < 10:
-            continue
-        avg_velo = tdf["RelSpeed"].mean()
-        whiff_pct = (tdf["PitchCall"] == "StrikeSwinging").sum() / max(tdf["PitchCall"].isin(["StrikeSwinging","FoulBall","FoulBallNotFieldable","InPlay"]).sum(), 1) * 100
-        k_pct = (tdf["KorBB"] == "Strikeout").sum() / max(tdf["PAofInning"].nunique(), 1) * 100
-        lines.append(f"  {team}: {len(tdf)} pitches, avg velo {avg_velo:.1f}, whiff% {whiff_pct:.1f}%")
-
-    # Batting/hitting summary
-    lines.append("")
-    lines.append("Hitting data (batters faced):")
-    in_play = df[df["PitchCall"] == "InPlay"]
-    if not in_play.empty and "ExitSpeed" in in_play.columns:
-        lines.append(f"  In-play events: {len(in_play):,}")
-        lines.append(f"  Avg exit velocity: {in_play['ExitSpeed'].mean():.1f} mph")
-        lines.append(f"  Avg launch angle: {in_play['LaunchAngle'].mean():.1f} degrees")
-        hr = (df["PlayResult"] == "HomeRun").sum()
-        singles = (df["PlayResult"] == "Single").sum()
-        doubles = (df["PlayResult"] == "Double").sum()
-        triples = (df["PlayResult"] == "Triple").sum()
-        lines.append(f"  HR: {hr}, 3B: {triples}, 2B: {doubles}, 1B: {singles}")
-
+    lines.append("Key column notes:")
+    lines.append("  - Pitcher names are 'Last, First' format")
+    lines.append("  - TopBottom: 'Top' = away team batting (home team pitching), 'Bottom' = home team batting (away team pitching)")
+    lines.append("  - PitchCall values: StrikeSwinging, StrikeCalled, Ball, FoulBall, FoulBallNotFieldable, InPlay, HitByPitch")
+    lines.append("  - KorBB values: Strikeout, Walk (blank otherwise)")
+    lines.append("  - PlayResult values: Single, Double, Triple, HomeRun, Out, Error, FieldersChoice, Sacrifice (blank otherwise)")
+    lines.append("  - SWING_CALLS = ['StrikeSwinging','FoulBall','FoulBallNotFieldable','InPlay']")
+    lines.append("  - Whiff% = StrikeSwinging / swings * 100")
+    lines.append("  - Chase% = swings on out-of-zone pitches / out-of-zone pitches * 100")
+    lines.append("  - Zone: PlateLocHeight between 1.5-3.5, PlateLocSide between -0.83 and 0.83")
+    lines.append("  - xwOBA column available for in-play events")
+    lines.append("  - InZone column: True/False")
     return "\n".join(lines)
 
 
-def call_claude_api(messages, system_prompt):
+def run_ai_code(code_str, df):
+    """Safely execute AI-generated pandas code and return result."""
+    import io, traceback
+    local_vars = {
+        "df": df,
+        "pd": pd,
+        "np": np,
+        "plt": plt,
+        "result": None,
+        "fig": None,
+        "BG_COLOR": BG_COLOR,
+        "PANEL_COLOR": PANEL_COLOR,
+        "TEXT_COLOR": TEXT_COLOR,
+        "ACCENT_COLOR": ACCENT_COLOR,
+        "MUTED_TEXT": MUTED_TEXT,
+        "GRID_COLOR": GRID_COLOR,
+        "PITCH_COLORS": PITCH_COLORS,
+        "pc": pc,
+    }
+    try:
+        exec(compile(code_str, "<ai_code>", "exec"), local_vars)
+        return local_vars.get("result"), local_vars.get("fig"), None
+    except Exception as e:
+        return None, None, traceback.format_exc()
+
+
+def call_groq_api(messages, system_prompt):
     """Call the Groq API."""
     api_key = st.secrets.get("GROQ_API_KEY", "gsk_REPLACE_WITH_YOUR_GROQ_API_KEY")
 
@@ -1088,15 +1079,16 @@ def call_claude_api(messages, system_prompt):
 
     payload = {
         "model": "llama-3.3-70b-versatile",
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "messages": groq_messages,
+        "temperature": 0.2,
     }
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=30,
+            timeout=45,
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"]
@@ -1104,74 +1096,6 @@ def call_claude_api(messages, system_prompt):
             return f"API error {resp.status_code}: {resp.text[:200]}"
     except Exception as e:
         return f"Request failed: {e}"
-
-
-def render_ai_chart(df, chart_spec):
-    """Parse chart spec from AI and render a matplotlib figure."""
-    import ast
-    try:
-        spec = ast.literal_eval(chart_spec) if isinstance(chart_spec, str) else chart_spec
-    except:
-        return None
-
-    chart_type = spec.get("type", "")
-    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
-    ax.set_facecolor(PANEL_COLOR)
-    for sp in ax.spines.values():
-        sp.set_color(GRID_COLOR)
-    ax.tick_params(colors=MUTED_TEXT, labelsize=9)
-
-    if chart_type == "bar":
-        labels = spec.get("labels", [])
-        values = spec.get("values", [])
-        colors = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
-        bars = ax.bar(labels, values, color=colors, edgecolor="black", linewidth=0.5)
-        ax.bar_label(bars, fmt=spec.get("fmt", "%.1f"), fontsize=9, color=TEXT_COLOR)
-        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
-
-    elif chart_type == "horizontal_bar":
-        labels = spec.get("labels", [])
-        values = spec.get("values", [])
-        colors = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
-        bars = ax.barh(labels, values, color=colors, edgecolor="black", linewidth=0.5)
-        ax.bar_label(bars, fmt=spec.get("fmt", "%.1f"), fontsize=9, color=TEXT_COLOR)
-        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
-
-    elif chart_type == "scatter":
-        xs = spec.get("x", [])
-        ys = spec.get("y", [])
-        labels = spec.get("labels", [])
-        colors_list = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
-        ax.scatter(xs, ys, c=colors_list, s=120, edgecolors="black", linewidths=0.8, zorder=5)
-        for i, lbl in enumerate(labels):
-            ax.annotate(lbl, (xs[i], ys[i]), textcoords="offset points",
-                       xytext=(5, 5), fontsize=8, color=TEXT_COLOR)
-        ax.axhline(0, color=GRID_COLOR, lw=0.8)
-        ax.axvline(0, color=GRID_COLOR, lw=0.8)
-        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
-
-    elif chart_type == "line":
-        xs = spec.get("x", [])
-        for series in spec.get("series", []):
-            ax.plot(xs, series["values"], label=series["name"],
-                   color=pc(series["name"]) if series["name"] in PITCH_COLORS else ACCENT_COLOR,
-                   marker="o", linewidth=2)
-        ax.legend(fontsize=9, frameon=False, labelcolor=TEXT_COLOR)
-        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
-        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
-
-    else:
-        plt.close(fig)
-        return None
-
-    fig.tight_layout()
-    return fig
 
 # ===========================================================================
 # STREAMLIT UI
@@ -1187,75 +1111,120 @@ df_all, parquet_path = load_all_pitches()
 # AI CHATBOT
 # ===========================================================================
 with st.expander("🤖 AI Baseball Analyst", expanded=False):
-    st.markdown("Ask any question about pitching or hitting data across all teams.")
+    st.markdown("Ask any question about pitching or hitting data. The AI has full access to all data in the parquet file.")
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
-    if "data_summary" not in st.session_state:
-        st.session_state["data_summary"] = None
+    if "df_schema" not in st.session_state:
+        st.session_state["df_schema"] = None
 
-    # Build data summary once
-    if df_all is not None and st.session_state["data_summary"] is None:
-        with st.spinner("Indexing data for AI..."):
-            st.session_state["data_summary"] = build_data_summary(df_all)
+    if df_all is not None and st.session_state["df_schema"] is None:
+        st.session_state["df_schema"] = get_df_schema(df_all)
 
     # Display chat history
     for msg in st.session_state["chat_history"]:
         with st.chat_message(msg["role"]):
-            if msg.get("chart"):
-                st.pyplot(msg["chart"])
-            else:
+            if msg.get("fig"):
+                st.pyplot(msg["fig"])
+            if msg.get("content"):
                 st.markdown(msg["content"])
 
-    # Input
-    user_input = st.chat_input("Ask about pitching, hitting, players, or teams...")
-    if user_input and st.session_state["data_summary"]:
+    user_input = st.chat_input("Ask about any pitcher, team, pitch type, hitting data...")
+    if user_input and df_all is not None:
         st.session_state["chat_history"].append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        system_prompt = f"""You are an expert baseball analyst with access to a college baseball TrackMan dataset.
-Here is a summary of the data:
+        schema = st.session_state["df_schema"]
 
-{st.session_state["data_summary"]}
+        system_prompt = f"""You are an expert baseball data analyst. You have direct access to a pandas DataFrame called `df` containing college baseball TrackMan data.
 
-Answer questions about pitching and hitting clearly and concisely.
-When a visual would help, respond with ONLY a Python dict on a single line starting with CHART: followed by the dict.
-Chart types available:
-- bar: {{"type":"bar","title":"...","labels":[...],"values":[...],"xlabel":"...","ylabel":"...","fmt":"%.1f"}}
-- horizontal_bar: {{"type":"horizontal_bar","title":"...","labels":[...],"values":[...],"xlabel":"...","fmt":"%.1f"}}
-- scatter: {{"type":"scatter","title":"...","x":[...],"y":[...],"labels":[...],"xlabel":"...","ylabel":"..."}}
-- line: {{"type":"line","title":"...","x":[...],"series":[{{"name":"...","values":[...]}}],"xlabel":"...","ylabel":"..."}}
+DATAFRAME SCHEMA:
+{schema}
 
-For text answers, just respond normally. Only use CHART: when a chart clearly adds value.
-Be specific with numbers from the data when possible."""
+YOUR JOB:
+1. Write Python/pandas code to answer the user's question
+2. Store the final answer in a variable called `result` (string)
+3. Optionally create a matplotlib figure stored in `fig` for visual questions
 
-        messages = [{"role": m["role"], "content": m["content"]}
-                    for m in st.session_state["chat_history"]
-                    if m["role"] in ("user", "assistant") and "content" in m]
+ALWAYS respond in this exact format:
+ANSWER: <1-2 sentence plain English answer here>
+CODE:
+```python
+# your pandas code here
+result = "your answer as a string"
+fig = None  # or a matplotlib figure
+```
+
+RULES:
+- Always set result to a readable string answer
+- For charts, create fig using matplotlib. Style with: fig, ax = plt.subplots(figsize=(10,5), facecolor=BG_COLOR); ax.set_facecolor(PANEL_COLOR)
+- Use pitch colors with pc(pitch_type) for pitch-specific charts
+- Keep code simple and safe - no file I/O, no imports (pd, np, plt already available)
+- For pitcher queries, names are 'Last, First' - use str.contains() for fuzzy matching
+- For IP calculations: count outs recorded (KorBB=='Strikeout' or PlayResult in outs list) then divide by 3
+- Whiff% = (PitchCall=='StrikeSwinging').sum() / PitchCall.isin(['StrikeSwinging','FoulBall','FoulBallNotFieldable','InPlay']).sum() * 100
+- Zone% = InZone.sum() / len(s) * 100 (InZone column exists)"""
+
+        messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state["chat_history"]
+            if m["role"] in ("user", "assistant") and m.get("content")
+        ]
 
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = call_claude_api(messages, system_prompt)
+            with st.spinner("Analyzing data..."):
+                response = call_groq_api(messages, system_prompt)
 
-            if response.startswith("CHART:"):
-                chart_str = response[6:].strip()
-                fig = render_ai_chart(df_all, chart_str)
-                if fig:
-                    st.pyplot(fig)
-                    st.session_state["chat_history"].append({"role": "assistant", "content": "", "chart": fig})
+            # Parse ANSWER and CODE blocks
+            answer_text = ""
+            fig = None
+            result_text = ""
+
+            if "ANSWER:" in response:
+                answer_part = response.split("ANSWER:")[1]
+                if "CODE:" in answer_part:
+                    answer_text = answer_part.split("CODE:")[0].strip()
+                    code_part = answer_part.split("CODE:")[1].strip()
                 else:
-                    st.markdown("I tried to generate a chart but couldn't parse it. Try asking in a different way.")
-                    st.session_state["chat_history"].append({"role": "assistant", "content": response})
+                    answer_text = answer_part.strip()
+                    code_part = ""
             else:
-                st.markdown(response)
-                st.session_state["chat_history"].append({"role": "assistant", "content": response})
+                answer_text = response
+                code_part = ""
+
+            # Extract code from markdown block
+            if "```python" in code_part:
+                code_str = code_part.split("```python")[1].split("```")[0].strip()
+            elif "```" in code_part:
+                code_str = code_part.split("```")[1].split("```")[0].strip()
+            else:
+                code_str = code_part.strip()
+
+            # Run the code
+            if code_str:
+                result, fig, error = run_ai_code(code_str, df_all)
+                if error:
+                    st.markdown(answer_text)
+                    st.caption(f"⚠️ Code execution note: {error[:200]}")
+                else:
+                    if fig:
+                        st.pyplot(fig)
+                    final_answer = str(result) if result else answer_text
+                    st.markdown(final_answer)
+            else:
+                st.markdown(answer_text)
+
+            st.session_state["chat_history"].append({
+                "role": "assistant",
+                "content": str(result) if (code_str and result) else answer_text,
+                "fig": fig,
+            })
 
     if st.session_state["chat_history"]:
         if st.button("🗑️ Clear chat", key="clear_chat"):
             st.session_state["chat_history"] = []
             st.rerun()
-
 
 with st.sidebar:
     st.header("Report Settings")
