@@ -1078,7 +1078,7 @@ def call_groq_api(messages, system_prompt):
     groq_messages = [{"role": "system", "content": system_prompt}] + messages
 
     payload = {
-        "model": "qwen-qwq-32b",
+        "model": "qwen/qwen3-32b",
         "max_tokens": 4000,
         "messages": groq_messages,
         "temperature": 0.2,
