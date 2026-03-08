@@ -15,7 +15,7 @@ Requires: D1_percentiles.json in same folder (for color grading)
 """
 
 import streamlit as st
-import json, os, io, math, warnings
+import json, os, io, math, warnings, requests
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -1007,6 +1007,172 @@ def parse_session_date(session, fallback_date):
                 pass
     return fallback_date
 
+
+# ===========================================================================
+# AI CHATBOT FUNCTIONS
+# ===========================================================================
+
+def build_data_summary(df):
+    """Build a compact summary of the full parquet for the AI context."""
+    lines = []
+    lines.append(f"Dataset: {len(df):,} pitches, {df['GameDate'].nunique()} game dates, {df['Pitcher'].nunique()} pitchers, {df['HomeTeam'].nunique() + df['AwayTeam'].nunique()} teams")
+    lines.append(f"Date range: {df['GameDate'].min()} to {df['GameDate'].max()}")
+    lines.append("")
+
+    # Team list
+    teams = sorted(set(df["HomeTeam"].dropna().unique()) | set(df["AwayTeam"].dropna().unique()))
+    lines.append(f"Teams ({len(teams)}): {', '.join(teams[:30])}{'...' if len(teams) > 30 else ''}")
+    lines.append("")
+
+    # Pitch type distribution
+    pt_counts = df["PitchType"].value_counts()
+    lines.append("Pitch type distribution:")
+    for pt, cnt in pt_counts.items():
+        lines.append(f"  {pt}: {cnt:,} ({cnt/len(df)*100:.1f}%)")
+    lines.append("")
+
+    # Top pitchers by pitch count
+    top_pitchers = df.groupby("Pitcher").agg(
+        Pitches=("PitchType", "count"),
+        Team=("PitcherTeam", "first"),
+        AvgVelo=("RelSpeed", "mean"),
+        Whiff=("PitchCall", lambda x: (x == "StrikeSwinging").sum()),
+        Swings=("PitchCall", lambda x: x.isin(["StrikeSwinging","FoulBall","FoulBallNotFieldable","InPlay"]).sum()),
+    ).reset_index()
+    top_pitchers["WhiffPct"] = (top_pitchers["Whiff"] / top_pitchers["Swings"] * 100).round(1)
+    top_pitchers = top_pitchers.sort_values("Pitches", ascending=False).head(50)
+    lines.append("Top pitchers (by pitch count):")
+    for _, row in top_pitchers.iterrows():
+        lines.append(f"  {row['Pitcher']}: {int(row['Pitches'])} pitches, avg velo {row['AvgVelo']:.1f}, whiff% {row['WhiffPct']:.1f}%")
+    lines.append("")
+
+    # Team-level pitching summary
+    lines.append("Team pitching summaries:")
+    for team in sorted(teams)[:40]:
+        mask = ((df["HomeTeam"] == team) & (df["TopBottom"] == "Top")) |                ((df["AwayTeam"] == team) & (df["TopBottom"] == "Bottom"))
+        tdf = df[mask]
+        if len(tdf) < 10:
+            continue
+        avg_velo = tdf["RelSpeed"].mean()
+        whiff_pct = (tdf["PitchCall"] == "StrikeSwinging").sum() / max(tdf["PitchCall"].isin(["StrikeSwinging","FoulBall","FoulBallNotFieldable","InPlay"]).sum(), 1) * 100
+        k_pct = (tdf["KorBB"] == "Strikeout").sum() / max(tdf["PAofInning"].nunique(), 1) * 100
+        lines.append(f"  {team}: {len(tdf)} pitches, avg velo {avg_velo:.1f}, whiff% {whiff_pct:.1f}%")
+
+    # Batting/hitting summary
+    lines.append("")
+    lines.append("Hitting data (batters faced):")
+    in_play = df[df["PitchCall"] == "InPlay"]
+    if not in_play.empty and "ExitSpeed" in in_play.columns:
+        lines.append(f"  In-play events: {len(in_play):,}")
+        lines.append(f"  Avg exit velocity: {in_play['ExitSpeed'].mean():.1f} mph")
+        lines.append(f"  Avg launch angle: {in_play['LaunchAngle'].mean():.1f} degrees")
+        hr = (df["PlayResult"] == "HomeRun").sum()
+        singles = (df["PlayResult"] == "Single").sum()
+        doubles = (df["PlayResult"] == "Double").sum()
+        triples = (df["PlayResult"] == "Triple").sum()
+        lines.append(f"  HR: {hr}, 3B: {triples}, 2B: {doubles}, 1B: {singles}")
+
+    return "\n".join(lines)
+
+
+def call_claude_api(messages, system_prompt):
+    """Call the Groq API."""
+    api_key = st.secrets.get("GROQ_API_KEY", "gsk_REPLACE_WITH_YOUR_GROQ_API_KEY")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    groq_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "max_tokens": 1500,
+        "messages": groq_messages,
+    }
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"]
+        else:
+            return f"API error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return f"Request failed: {e}"
+
+
+def render_ai_chart(df, chart_spec):
+    """Parse chart spec from AI and render a matplotlib figure."""
+    import ast
+    try:
+        spec = ast.literal_eval(chart_spec) if isinstance(chart_spec, str) else chart_spec
+    except:
+        return None
+
+    chart_type = spec.get("type", "")
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
+    ax.set_facecolor(PANEL_COLOR)
+    for sp in ax.spines.values():
+        sp.set_color(GRID_COLOR)
+    ax.tick_params(colors=MUTED_TEXT, labelsize=9)
+
+    if chart_type == "bar":
+        labels = spec.get("labels", [])
+        values = spec.get("values", [])
+        colors = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
+        bars = ax.bar(labels, values, color=colors, edgecolor="black", linewidth=0.5)
+        ax.bar_label(bars, fmt=spec.get("fmt", "%.1f"), fontsize=9, color=TEXT_COLOR)
+        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
+
+    elif chart_type == "horizontal_bar":
+        labels = spec.get("labels", [])
+        values = spec.get("values", [])
+        colors = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
+        bars = ax.barh(labels, values, color=colors, edgecolor="black", linewidth=0.5)
+        ax.bar_label(bars, fmt=spec.get("fmt", "%.1f"), fontsize=9, color=TEXT_COLOR)
+        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
+
+    elif chart_type == "scatter":
+        xs = spec.get("x", [])
+        ys = spec.get("y", [])
+        labels = spec.get("labels", [])
+        colors_list = [pc(l) if l in PITCH_COLORS else ACCENT_COLOR for l in labels]
+        ax.scatter(xs, ys, c=colors_list, s=120, edgecolors="black", linewidths=0.8, zorder=5)
+        for i, lbl in enumerate(labels):
+            ax.annotate(lbl, (xs[i], ys[i]), textcoords="offset points",
+                       xytext=(5, 5), fontsize=8, color=TEXT_COLOR)
+        ax.axhline(0, color=GRID_COLOR, lw=0.8)
+        ax.axvline(0, color=GRID_COLOR, lw=0.8)
+        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
+
+    elif chart_type == "line":
+        xs = spec.get("x", [])
+        for series in spec.get("series", []):
+            ax.plot(xs, series["values"], label=series["name"],
+                   color=pc(series["name"]) if series["name"] in PITCH_COLORS else ACCENT_COLOR,
+                   marker="o", linewidth=2)
+        ax.legend(fontsize=9, frameon=False, labelcolor=TEXT_COLOR)
+        ax.set_xlabel(spec.get("xlabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_ylabel(spec.get("ylabel", ""), color=MUTED_TEXT, fontsize=10)
+        ax.set_title(spec.get("title", ""), color=TEXT_COLOR, fontsize=13, fontweight="bold")
+
+    else:
+        plt.close(fig)
+        return None
+
+    fig.tight_layout()
+    return fig
+
 # ===========================================================================
 # STREAMLIT UI
 # ===========================================================================
@@ -1016,6 +1182,80 @@ st.title("⚾ TrackMan Pitching Report")
 # LOAD DATA FROM PARQUET
 # ===========================================================================
 df_all, parquet_path = load_all_pitches()
+
+# ===========================================================================
+# AI CHATBOT
+# ===========================================================================
+with st.expander("🤖 AI Baseball Analyst", expanded=False):
+    st.markdown("Ask any question about pitching or hitting data across all teams.")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+    if "data_summary" not in st.session_state:
+        st.session_state["data_summary"] = None
+
+    # Build data summary once
+    if df_all is not None and st.session_state["data_summary"] is None:
+        with st.spinner("Indexing data for AI..."):
+            st.session_state["data_summary"] = build_data_summary(df_all)
+
+    # Display chat history
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            if msg.get("chart"):
+                st.pyplot(msg["chart"])
+            else:
+                st.markdown(msg["content"])
+
+    # Input
+    user_input = st.chat_input("Ask about pitching, hitting, players, or teams...")
+    if user_input and st.session_state["data_summary"]:
+        st.session_state["chat_history"].append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        system_prompt = f"""You are an expert baseball analyst with access to a college baseball TrackMan dataset.
+Here is a summary of the data:
+
+{st.session_state["data_summary"]}
+
+Answer questions about pitching and hitting clearly and concisely.
+When a visual would help, respond with ONLY a Python dict on a single line starting with CHART: followed by the dict.
+Chart types available:
+- bar: {{"type":"bar","title":"...","labels":[...],"values":[...],"xlabel":"...","ylabel":"...","fmt":"%.1f"}}
+- horizontal_bar: {{"type":"horizontal_bar","title":"...","labels":[...],"values":[...],"xlabel":"...","fmt":"%.1f"}}
+- scatter: {{"type":"scatter","title":"...","x":[...],"y":[...],"labels":[...],"xlabel":"...","ylabel":"..."}}
+- line: {{"type":"line","title":"...","x":[...],"series":[{{"name":"...","values":[...]}}],"xlabel":"...","ylabel":"..."}}
+
+For text answers, just respond normally. Only use CHART: when a chart clearly adds value.
+Be specific with numbers from the data when possible."""
+
+        messages = [{"role": m["role"], "content": m["content"]}
+                    for m in st.session_state["chat_history"]
+                    if m["role"] in ("user", "assistant") and "content" in m]
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = call_claude_api(messages, system_prompt)
+
+            if response.startswith("CHART:"):
+                chart_str = response[6:].strip()
+                fig = render_ai_chart(df_all, chart_str)
+                if fig:
+                    st.pyplot(fig)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": "", "chart": fig})
+                else:
+                    st.markdown("I tried to generate a chart but couldn't parse it. Try asking in a different way.")
+                    st.session_state["chat_history"].append({"role": "assistant", "content": response})
+            else:
+                st.markdown(response)
+                st.session_state["chat_history"].append({"role": "assistant", "content": response})
+
+    if st.session_state["chat_history"]:
+        if st.button("🗑️ Clear chat", key="clear_chat"):
+            st.session_state["chat_history"] = []
+            st.rerun()
+
 
 with st.sidebar:
     st.header("Report Settings")
