@@ -1012,6 +1012,1403 @@ def parse_session_date(session, fallback_date):
 # AI CHATBOT FUNCTIONS
 # ===========================================================================
 
+# ── Shared constants for the library ────────────────────────────────────────
+_SWING_CALLS  = ["StrikeSwinging", "FoulBall", "FoulBallNotFieldable", "InPlay"]
+_STRIKE_CALLS = ["StrikeSwinging", "StrikeCalled", "FoulBall", "FoulBallNotFieldable"]
+_OUT_RESULTS  = ["Out", "Sacrifice", "FieldersChoice", "Error"]
+_HIT_RESULTS  = ["Single", "Double", "Triple", "HomeRun"]
+_ZX1, _ZX2   = -0.83, 0.83
+_ZY1, _ZY2   = 1.50, 3.50
+_ZY3          = (_ZY2 - _ZY1) / 3.0   # one-third = 0.667 ft
+
+# ── Internal helpers ─────────────────────────────────────────────────────────
+
+def _find_pitcher(df, name):
+    """Fuzzy match pitcher name — handles 'First Last' or 'Last, First'."""
+    name_clean = name.lower().replace(",", " ").replace("  ", " ").strip()
+    parts = [p for p in name_clean.split() if len(p) > 1]
+    # exact match first
+    exact = df[df["Pitcher"].str.lower().str.replace(",", " ") == name_clean]
+    if not exact.empty:
+        return exact
+    # all-parts match
+    mask = pd.Series([True] * len(df), index=df.index)
+    for p in parts:
+        mask &= df["Pitcher"].str.lower().str.contains(p, na=False)
+    result = df[mask]
+    if not result.empty:
+        return result
+    # any single part
+    for p in sorted(parts, key=len, reverse=True):
+        m = df["Pitcher"].str.lower().str.contains(p, na=False)
+        if m.sum() > 0:
+            return df[m]
+    return df.iloc[0:0]
+
+def _find_batter(df, name):
+    """Fuzzy match batter name."""
+    name_clean = name.lower().replace(",", " ").replace("  ", " ").strip()
+    parts = [p for p in name_clean.split() if len(p) > 1]
+    mask = pd.Series([True] * len(df), index=df.index)
+    for p in parts:
+        mask &= df["Batter"].str.lower().str.contains(p, na=False)
+    result = df[mask]
+    if not result.empty:
+        return result
+    for p in sorted(parts, key=len, reverse=True):
+        m = df["Batter"].str.lower().str.contains(p, na=False)
+        if m.sum() > 0:
+            return df[m]
+    return df.iloc[0:0]
+
+def _find_team(df, name):
+    """Return all pitches THROWN BY a team (home team pitching Top, away team pitching Bottom)."""
+    nl = name.lower()
+    hm = df["HomeTeam"].str.lower().str.contains(nl, na=False)
+    aw = df["AwayTeam"].str.lower().str.contains(nl, na=False)
+    return pd.concat([
+        df[hm & (df["TopBottom"] == "Top")],
+        df[aw & (df["TopBottom"] == "Bottom")],
+    ])
+
+def _find_team_batting(df, name):
+    """Return all plate appearances WHERE a team was BATTING."""
+    nl = name.lower()
+    hm = df["HomeTeam"].str.lower().str.contains(nl, na=False)
+    aw = df["AwayTeam"].str.lower().str.contains(nl, na=False)
+    return pd.concat([
+        df[hm & (df["TopBottom"] == "Bottom")],
+        df[aw & (df["TopBottom"] == "Top")],
+    ])
+
+def _fp(df, pitch_type):
+    """Filter by pitch type (None = no filter). Handles common aliases."""
+    if pitch_type is None:
+        return df
+    aliases = {
+        "four seam": "Fastball", "4seam": "Fastball", "4-seam": "Fastball",
+        "fastball": "Fastball", "fb": "Fastball",
+        "two seam": "Sinker", "2seam": "Sinker", "2-seam": "Sinker", "sinker": "Sinker",
+        "cut fastball": "Cutter", "cutter": "Cutter", "cut": "Cutter",
+        "slider": "Slider", "sl": "Slider",
+        "curveball": "Curveball", "curve": "Curveball", "cb": "Curveball",
+        "changeup": "ChangeUp", "change": "ChangeUp", "ch": "ChangeUp", "change-up": "ChangeUp",
+        "splitter": "Splitter", "split": "Splitter", "fs": "Splitter",
+        "sweeper": "Sweeper",
+    }
+    norm = aliases.get(pitch_type.lower().strip(), pitch_type)
+    return df[df["PitchType"].str.lower().str.contains(norm.lower(), na=False)]
+
+def _iz(df):
+    """Boolean mask: pitch is in the strike zone."""
+    return (df["PlateLocSide"].between(_ZX1, _ZX2) &
+            df["PlateLocHeight"].between(_ZY1, _ZY2))
+
+def _pct(num, den, dec=1):
+    if den == 0 or pd.isna(den): return None
+    return round(float(num) / float(den) * 100, dec)
+
+def _fmt(v, unit="", dec=1):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return "N/A"
+    return f"{round(float(v), dec)}{unit}"
+
+def _ax_style(ax):
+    ax.set_facecolor(PANEL_COLOR)
+    for sp in ax.spines.values(): sp.set_color(GRID_COLOR)
+    ax.tick_params(colors=MUTED_TEXT, labelsize=9)
+    ax.xaxis.label.set_color(MUTED_TEXT)
+    ax.yaxis.label.set_color(MUTED_TEXT)
+    ax.title.set_color(TEXT_COLOR)
+
+def _pa_count(df):
+    """Count distinct plate appearances."""
+    return df.groupby(["GameDate", "Inning", "TopBottom", "PAofInning"]).ngroups
+
+def _count_outs(df):
+    """Count outs recorded (K + balls in play that result in outs)."""
+    last = df.sort_values("PitchofPA").groupby(
+        ["GameDate", "Inning", "TopBottom", "PAofInning"]).last().reset_index()
+    return ((last["KorBB"] == "Strikeout") | (last["PlayResult"].isin(_OUT_RESULTS))).sum()
+
+def _ip_str(outs):
+    return f"{outs // 3}.{outs % 3}"
+
+# ── VELOCITY ─────────────────────────────────────────────────────────────────
+
+def lib_pitcher_avg_velo(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    v = s["RelSpeed"].dropna()
+    if v.empty: return "No velocity data found."
+    name = s["Pitcher"].iloc[0]
+    pt = pitch_type or "all pitches"
+    return f"{name} avg velo ({pt}): {v.mean():.1f} mph | max: {v.max():.1f} | min: {v.min():.1f} | n={len(v)}"
+
+def lib_pitcher_max_velo(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    v = s["RelSpeed"].dropna()
+    if v.empty: return "No velocity data found."
+    return f"{s['Pitcher'].iloc[0]} max velo ({pitch_type or 'all'}): {v.max():.1f} mph"
+
+def lib_pitcher_velo_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Pitcher not found."
+    lines = [f"Velocity by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        v = g["RelSpeed"].dropna()
+        if not v.empty:
+            lines.append(f"  {pt}: avg {v.mean():.1f} | max {v.max():.1f} | min {v.min():.1f} | n={len(v)}")
+    return "\n".join(lines)
+
+def lib_pitcher_velo_spread(df, pitcher, pitch_type=None):
+    """Std dev / spread of velocity."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    v = s["RelSpeed"].dropna()
+    if v.empty: return "No data."
+    return (f"{s['Pitcher'].iloc[0]} velo spread ({pitch_type or 'all'}):\n"
+            f"  Avg: {v.mean():.1f} | StdDev: {v.std():.2f} | "
+            f"10th pct: {v.quantile(0.1):.1f} | 90th pct: {v.quantile(0.9):.1f}")
+
+def lib_pitcher_velo_by_inning(df, pitcher, pitch_type=None):
+    """How does velocity change by inning?"""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    lines = [f"{s['Pitcher'].iloc[0]} velo by inning ({pitch_type or 'all'}):"]
+    for inn, g in s.groupby("Inning"):
+        v = g["RelSpeed"].dropna()
+        if not v.empty:
+            lines.append(f"  Inning {int(inn)}: {v.mean():.1f} mph ({len(v)} pitches)")
+    return "\n".join(lines)
+
+def lib_pitcher_velo_trend(df, pitcher, pitch_type=None):
+    """Avg velocity per outing over the season."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data.", None
+    trend = s.groupby("GameDate")["RelSpeed"].agg(["mean","count"]).reset_index()
+    trend = trend[trend["count"] >= 3]
+    if len(trend) < 2: return "Not enough outings for trend.", None
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
+    _ax_style(ax)
+    dates = [str(d) for d in trend["GameDate"]]
+    vals  = trend["mean"].tolist()
+    ax.plot(dates, vals, marker="o", color=ACCENT_COLOR, lw=2.5, ms=8)
+    for d, v in zip(dates, vals):
+        ax.annotate(f"{v:.1f}", (d, v), textcoords="offset points",
+                    xytext=(0,10), fontsize=8, color=TEXT_COLOR, ha="center")
+    ax.set_xlabel("Date"); ax.set_ylabel("Avg Velocity (mph)")
+    ax.set_title(f"Velocity Trend — {s['Pitcher'].iloc[0]} ({pitch_type or 'all'})", fontweight="bold")
+    plt.xticks(rotation=30, ha="right"); fig.tight_layout()
+    return f"Velocity trend for {s['Pitcher'].iloc[0]}", fig
+
+def lib_team_avg_velo(df, team, pitch_type=None):
+    s = _fp(_find_team(df, team), pitch_type)
+    v = s["RelSpeed"].dropna()
+    if v.empty: return "No data."
+    return f"{team} avg velo ({pitch_type or 'all'}): {v.mean():.1f} mph | max: {v.max():.1f}"
+
+def lib_top_velo_pitchers(df, n=15, pitch_type=None, min_n=30):
+    s = _fp(df, pitch_type)
+    rows = []
+    for p, g in s.groupby("Pitcher"):
+        v = g["RelSpeed"].dropna()
+        if len(v) >= min_n:
+            rows.append({"Pitcher": p, "avg": v.mean(), "max": v.max(), "n": len(v)})
+    if not rows: return "No data."
+    out = sorted(rows, key=lambda x: x["avg"], reverse=True)[:n]
+    lines = [f"Top {n} pitchers by avg velo ({pitch_type or 'all'}, min {min_n} pitches):"]
+    for r in out:
+        lines.append(f"  {r['Pitcher']}: avg {r['avg']:.1f} | max {r['max']:.1f} | n={r['n']}")
+    return "\n".join(lines)
+
+def lib_velo_chart(df, pitcher):
+    """Violin-style velocity distribution per pitch type."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    pts = [pt for pt in s["PitchType"].value_counts().index if len(s[s["PitchType"]==pt]["RelSpeed"].dropna()) >= 5]
+    if not pts: return "Insufficient data.", None
+    fig, ax = plt.subplots(figsize=(11, 5), facecolor=BG_COLOR)
+    _ax_style(ax)
+    data = [s[s["PitchType"]==pt]["RelSpeed"].dropna().values for pt in pts]
+    parts = ax.violinplot(data, positions=range(len(pts)), showmedians=True, showextrema=False)
+    for i, (pc_val, pt) in enumerate(zip(parts["bodies"], pts)):
+        pc_val.set_facecolor(pc(pt)); pc_val.set_alpha(0.8)
+    parts["cmedians"].set_color("white"); parts["cmedians"].set_linewidth(2)
+    ax.set_xticks(range(len(pts))); ax.set_xticklabels(pts, fontsize=10)
+    ax.set_ylabel("Velocity (mph)"); ax.set_title(f"Velocity Distribution — {s['Pitcher'].iloc[0]}", fontweight="bold")
+    fig.tight_layout()
+    return f"Velocity chart for {s['Pitcher'].iloc[0]}", fig
+
+# ── SPIN / MOVEMENT / SHAPE ───────────────────────────────────────────────────
+
+def lib_pitcher_spin(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    sp = s["SpinRate"].dropna()
+    if sp.empty: return "No spin data."
+    return (f"{s['Pitcher'].iloc[0]} spin ({pitch_type or 'all'}):\n"
+            f"  Avg: {sp.mean():.0f} rpm | Max: {sp.max():.0f} | StdDev: {sp.std():.0f}")
+
+def lib_pitcher_spin_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Spin rate by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        sp = g["SpinRate"].dropna()
+        if not sp.empty:
+            lines.append(f"  {pt}: avg {sp.mean():.0f} rpm | max {sp.max():.0f}")
+    return "\n".join(lines)
+
+def lib_pitcher_movement(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    ivb = s["InducedVertBreak"].dropna()
+    hb  = s["HorzBreak"].dropna()
+    name = s["Pitcher"].iloc[0]
+    return (f"{name} movement ({pitch_type or 'all'}):\n"
+            f"  IVB: {ivb.mean():.1f} in (+ = rise, - = drop)\n"
+            f"  HB:  {hb.mean():.1f} in (+ = arm side, - = glove side)")
+
+def lib_pitcher_movement_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Movement by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        ivb = g["InducedVertBreak"].dropna()
+        hb  = g["HorzBreak"].dropna()
+        if not ivb.empty:
+            lines.append(f"  {pt}: IVB {ivb.mean():.1f} in, HB {hb.mean():.1f} in")
+    return "\n".join(lines)
+
+def lib_movement_chart(df, pitcher):
+    """Movement profile scatter (IVB vs HB, one dot per pitch type)."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    fig, ax = plt.subplots(figsize=(8, 8), facecolor=BG_COLOR)
+    _ax_style(ax)
+    ax.axhline(0, color=GRID_COLOR, lw=1); ax.axvline(0, color=GRID_COLOR, lw=1)
+    for r in [5, 10, 15, 20]:
+        ax.add_patch(plt.Circle((0,0), r, fill=False, ec=GRID_COLOR, lw=0.5, ls="--", alpha=0.4))
+    for pt, g in s.groupby("PitchType"):
+        ivb = g["InducedVertBreak"].dropna(); hb = g["HorzBreak"].dropna()
+        if not ivb.empty:
+            ax.scatter(hb.mean(), ivb.mean(), c=pc(pt), s=220, label=f"{pt} ({len(g)})",
+                       edgecolors="white", linewidths=1.5, zorder=5)
+            ax.annotate(f"{pt}\n({hb.mean():.1f}, {ivb.mean():.1f})",
+                        (hb.mean(), ivb.mean()), textcoords="offset points",
+                        xytext=(9, 9), fontsize=8, color=TEXT_COLOR)
+    ax.set_xlim(-25, 25); ax.set_ylim(-25, 25)
+    ax.set_xlabel("Horizontal Break (in) — + Arm Side"); ax.set_ylabel("Induced Vertical Break (in)")
+    ax.set_title(f"Movement Profile — {s['Pitcher'].iloc[0]}", fontweight="bold")
+    ax.legend(fontsize=8, frameon=False, labelcolor=TEXT_COLOR)
+    fig.tight_layout()
+    return f"Movement chart — {s['Pitcher'].iloc[0]}", fig
+
+def lib_pitcher_extension(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    e = s["Extension"].dropna()
+    if e.empty: return "No extension data."
+    return f"{s['Pitcher'].iloc[0]} extension ({pitch_type or 'all'}): avg {e.mean():.1f} ft | max {e.max():.1f}"
+
+def lib_pitcher_release_point(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    rh = s["RelHeight"].dropna(); rs = s["RelSide"].dropna()
+    return (f"{s['Pitcher'].iloc[0]} release point ({pitch_type or 'all'}):\n"
+            f"  Height: {rh.mean():.2f} ft\n"
+            f"  Side: {rs.mean():.2f} ft (+ = arm side)")
+
+def lib_release_point_chart(df, pitcher):
+    """Scatter of release points per pitch type."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    fig, ax = plt.subplots(figsize=(7, 7), facecolor=BG_COLOR)
+    _ax_style(ax)
+    for pt, g in s.groupby("PitchType"):
+        rh = g["RelHeight"].dropna(); rs = g["RelSide"].dropna()
+        if len(rh) > 3:
+            ax.scatter(rs, rh, c=pc(pt), alpha=0.35, s=20, label=pt)
+            ax.scatter(rs.mean(), rh.mean(), c=pc(pt), s=180, edgecolors="white", lw=2, zorder=5)
+    ax.set_xlabel("Release Side (ft)"); ax.set_ylabel("Release Height (ft)")
+    ax.set_title(f"Release Point — {s['Pitcher'].iloc[0]}", fontweight="bold")
+    ax.legend(fontsize=8, frameon=False, labelcolor=TEXT_COLOR)
+    fig.tight_layout()
+    return f"Release point chart — {s['Pitcher'].iloc[0]}", fig
+
+def lib_pitcher_vaa(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    v = s["VertApprAngle"].dropna()
+    if v.empty: return "No VAA data."
+    return (f"{s['Pitcher'].iloc[0]} VAA ({pitch_type or 'all'}):\n"
+            f"  Avg: {v.mean():.1f}° | Steeper = more negative")
+
+def lib_pitcher_vaa_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Vertical approach angle by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        v = g["VertApprAngle"].dropna()
+        if not v.empty:
+            lines.append(f"  {pt}: {v.mean():.1f}° (n={len(v)})")
+    return "\n".join(lines)
+
+# ── WHIFF / SWING / CONTACT ───────────────────────────────────────────────────
+
+def lib_pitcher_whiff(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    swings = s["PitchCall"].isin(_SWING_CALLS).sum()
+    whiffs = (s["PitchCall"] == "StrikeSwinging").sum()
+    pct = _pct(whiffs, swings)
+    return f"{s['Pitcher'].iloc[0]} whiff% ({pitch_type or 'all'}): {_fmt(pct,'%')} ({whiffs}/{swings} swings)"
+
+def lib_pitcher_whiff_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Whiff% by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"] == "StrikeSwinging").sum()
+        lines.append(f"  {pt}: {_fmt(_pct(wh,sw),'%')} ({wh}/{sw})")
+    return "\n".join(lines)
+
+def lib_pitcher_whiff_vs_hand(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "Not found."
+    lines = [f"{s['Pitcher'].iloc[0]} whiff% by batter hand ({pitch_type or 'all'}):"]
+    for side, lbl in [("Left","vs LHB"),("Right","vs RHB")]:
+        g = s[s["BatterSide"] == side]
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"] == "StrikeSwinging").sum()
+        lines.append(f"  {lbl}: {_fmt(_pct(wh,sw),'%')} ({wh}/{sw})")
+    return "\n".join(lines)
+
+def lib_pitcher_whiff_trend(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data.", None
+    rows = []
+    for gd, g in s.groupby("GameDate"):
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"] == "StrikeSwinging").sum()
+        p  = _pct(wh, sw)
+        if p is not None and sw >= 3:
+            rows.append({"d": str(gd), "pct": p})
+    if len(rows) < 2: return "Not enough outings.", None
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
+    _ax_style(ax)
+    dates = [r["d"] for r in rows]; vals = [r["pct"] for r in rows]
+    ax.plot(dates, vals, marker="o", color="#FF4488", lw=2.5, ms=8)
+    for d, v in zip(dates, vals):
+        ax.annotate(f"{v:.1f}%", (d, v), textcoords="offset points",
+                    xytext=(0,10), fontsize=8, color=TEXT_COLOR, ha="center")
+    ax.set_ylabel("Whiff %"); ax.set_title(f"Whiff% Trend — {s['Pitcher'].iloc[0]} ({pitch_type or 'all'})", fontweight="bold")
+    plt.xticks(rotation=30, ha="right"); fig.tight_layout()
+    return f"Whiff% trend — {s['Pitcher'].iloc[0]}", fig
+
+def lib_whiff_chart(df, pitcher):
+    """Bar chart of whiff% per pitch type."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    data = []
+    for pt, g in s.groupby("PitchType"):
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"] == "StrikeSwinging").sum()
+        p  = _pct(wh, sw)
+        if p is not None and sw >= 5:
+            data.append((pt, p))
+    if not data: return "Insufficient data.", None
+    data.sort(key=lambda x: x[1], reverse=True)
+    labels, vals = zip(*data)
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
+    _ax_style(ax)
+    bars = ax.bar(labels, vals, color=[pc(l) for l in labels], edgecolor="white", lw=0.5)
+    ax.bar_label(bars, fmt="%.1f%%", fontsize=10, color=TEXT_COLOR, padding=3)
+    ax.set_ylabel("Whiff %"); ax.set_ylim(0, max(vals)*1.25)
+    ax.set_title(f"Whiff% by Pitch Type — {s['Pitcher'].iloc[0]}", fontweight="bold")
+    fig.tight_layout()
+    return f"Whiff% chart — {s['Pitcher'].iloc[0]}", fig
+
+def lib_pitcher_swing_pct(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum()
+    return f"{s['Pitcher'].iloc[0]} swing% ({pitch_type or 'all'}): {_fmt(_pct(sw,len(s)),'%')} ({sw}/{len(s)})"
+
+def lib_pitcher_contact_pct(df, pitcher, pitch_type=None):
+    """Contact% = InPlay+Foul / all swings."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum()
+    contact = s["PitchCall"].isin(["InPlay","FoulBall","FoulBallNotFieldable"]).sum()
+    return f"{s['Pitcher'].iloc[0]} contact% ({pitch_type or 'all'}): {_fmt(_pct(contact,sw),'%')} ({contact}/{sw} swings)"
+
+def lib_team_whiff(df, team, pitch_type=None):
+    s = _fp(_find_team(df, team), pitch_type)
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum()
+    wh = (s["PitchCall"] == "StrikeSwinging").sum()
+    return f"{team} whiff% ({pitch_type or 'all'}): {_fmt(_pct(wh,sw),'%')} ({wh}/{sw})"
+
+def lib_top_whiff_pitchers(df, n=15, pitch_type=None, min_swings=30):
+    s = _fp(df, pitch_type)
+    rows = []
+    for p, g in s.groupby("Pitcher"):
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"] == "StrikeSwinging").sum()
+        pct = _pct(wh, sw)
+        if pct is not None and sw >= min_swings:
+            rows.append({"p": p, "pct": pct, "sw": int(sw)})
+    rows.sort(key=lambda x: x["pct"], reverse=True)
+    lines = [f"Top {n} pitchers by whiff% ({pitch_type or 'all'}, min {min_swings} swings):"]
+    for r in rows[:n]:
+        lines.append(f"  {r['p']}: {r['pct']:.1f}% ({r['sw']} swings)")
+    return "\n".join(lines)
+
+# ── ZONE / CHASE / LOCATION ───────────────────────────────────────────────────
+
+def lib_pitcher_zone_pct(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    iz = _iz(s).sum()
+    return f"{s['Pitcher'].iloc[0]} zone% ({pitch_type or 'all'}): {_fmt(_pct(iz,len(s)),'%')} ({iz}/{len(s)})"
+
+def lib_pitcher_zone_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Zone% by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        iz = _iz(g).sum()
+        lines.append(f"  {pt}: {_fmt(_pct(iz,len(g)),'%')} ({iz}/{len(g)})")
+    return "\n".join(lines)
+
+def lib_pitcher_chase_pct(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    ooz = s[~_iz(s)]
+    sw  = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+    return f"{s['Pitcher'].iloc[0]} chase% ({pitch_type or 'all'}): {_fmt(_pct(sw,len(ooz)),'%')} ({sw}/{len(ooz)} OOZ)"
+
+def lib_pitcher_chase_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Chase% by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        ooz = g[~_iz(g)]
+        sw  = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+        lines.append(f"  {pt}: {_fmt(_pct(sw,len(ooz)),'%')} ({sw}/{len(ooz)})")
+    return "\n".join(lines)
+
+def lib_pitcher_iz_whiff(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    iz = s[_iz(s)]
+    sw = iz["PitchCall"].isin(_SWING_CALLS).sum()
+    wh = (iz["PitchCall"] == "StrikeSwinging").sum()
+    return f"{s['Pitcher'].iloc[0]} in-zone whiff% ({pitch_type or 'all'}): {_fmt(_pct(wh,sw),'%')} ({wh}/{sw})"
+
+def lib_pitcher_csw(df, pitcher, pitch_type=None):
+    """Called Strike + Whiff % (CSW)."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    csw = s["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum()
+    return f"{s['Pitcher'].iloc[0]} CSW% ({pitch_type or 'all'}): {_fmt(_pct(csw,len(s)),'%')} ({csw}/{len(s)})"
+
+def lib_pitcher_csw_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"CSW% by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        csw = g["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum()
+        lines.append(f"  {pt}: {_fmt(_pct(csw,len(g)),'%')} ({csw}/{len(g)})")
+    return "\n".join(lines)
+
+def lib_pitcher_called_strike_pct(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    cs = (s["PitchCall"] == "StrikeCalled").sum()
+    return f"{s['Pitcher'].iloc[0]} called strike% ({pitch_type or 'all'}): {_fmt(_pct(cs,len(s)),'%')} ({cs}/{len(s)})"
+
+def lib_pitcher_strike_pct(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    st = s["PitchCall"].isin(_STRIKE_CALLS).sum()
+    return f"{s['Pitcher'].iloc[0]} strike% ({pitch_type or 'all'}): {_fmt(_pct(st,len(s)),'%')} ({st}/{len(s)})"
+
+def lib_pitcher_first_pitch_strike(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    fp = s[s["PitchofPA"] == 1]
+    st = fp["PitchCall"].isin(_STRIKE_CALLS).sum()
+    return f"{s['Pitcher'].iloc[0]} first-pitch strike%: {_fmt(_pct(st,len(fp)),'%')} ({st}/{len(fp)} PAs)"
+
+def lib_pitcher_zone_thirds(df, pitcher, pitch_type=None):
+    """% of ALL pitches in upper / middle / lower third of zone area."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    total = len(s)
+    up  = (s["PlateLocHeight"] > _ZY1 + 2*_ZY3).sum()
+    mid = ((s["PlateLocHeight"] >= _ZY1 + _ZY3) & (s["PlateLocHeight"] <= _ZY1 + 2*_ZY3)).sum()
+    lo  = (s["PlateLocHeight"] < _ZY1 + _ZY3).sum()
+    return (f"{s['Pitcher'].iloc[0]} vertical zones ({pitch_type or 'all'}, of ALL pitches):\n"
+            f"  Upper zone:  {_fmt(_pct(up,total),'%')} ({up})\n"
+            f"  Middle zone: {_fmt(_pct(mid,total),'%')} ({mid})\n"
+            f"  Lower zone:  {_fmt(_pct(lo,total),'%')} ({lo})")
+
+def lib_pitcher_zone_thirds_inzone(df, pitcher, pitch_type=None):
+    """% of IN-ZONE pitches in upper / middle / lower third."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    iz = s[_iz(s)]
+    if iz.empty: return "No in-zone pitches."
+    total = len(iz)
+    up  = (iz["PlateLocHeight"] > _ZY1 + 2*_ZY3).sum()
+    mid = ((iz["PlateLocHeight"] >= _ZY1 + _ZY3) & (iz["PlateLocHeight"] <= _ZY1 + 2*_ZY3)).sum()
+    lo  = (iz["PlateLocHeight"] < _ZY1 + _ZY3).sum()
+    return (f"{s['Pitcher'].iloc[0]} zone thirds ({pitch_type or 'all'}, of IN-ZONE pitches):\n"
+            f"  Upper third:  {_fmt(_pct(up,total),'%')} ({up})\n"
+            f"  Middle third: {_fmt(_pct(mid,total),'%')} ({mid})\n"
+            f"  Lower third:  {_fmt(_pct(lo,total),'%')} ({lo})")
+
+def lib_pitcher_miss_direction(df, pitcher, pitch_type=None):
+    """Direction of misses (balls only)."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    balls = s[s["PitchCall"] == "Ball"]
+    if balls.empty: return "No ball data."
+    total = len(balls)
+    high  = (balls["PlateLocHeight"] > _ZY2).sum()
+    low   = (balls["PlateLocHeight"] < _ZY1).sum()
+    arm   = (balls["PlateLocSide"]   > _ZX2).sum()
+    glove = (balls["PlateLocSide"]   < _ZX1).sum()
+    primary = max([("High",high),("Low",low),("Arm side",arm),("Glove side",glove)], key=lambda x:x[1])[0]
+    return (f"{s['Pitcher'].iloc[0]} miss direction ({pitch_type or 'all'}, {total} balls):\n"
+            f"  High:       {_fmt(_pct(high,total),'%')} ({high})\n"
+            f"  Low:        {_fmt(_pct(low,total),'%')} ({low})\n"
+            f"  Arm side:   {_fmt(_pct(arm,total),'%')} ({arm})\n"
+            f"  Glove side: {_fmt(_pct(glove,total),'%')} ({glove})\n"
+            f"  → Primary miss: {primary}")
+
+def lib_pitcher_avg_location(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    side   = s["PlateLocSide"].dropna().mean()
+    height = s["PlateLocHeight"].dropna().mean()
+    side_d = "arm side" if side > 0.1 else "glove side" if side < -0.1 else "middle"
+    ht_d   = "high" if height > 2.8 else "low" if height < 2.2 else "middle"
+    return (f"{s['Pitcher'].iloc[0]} avg location ({pitch_type or 'all'}):\n"
+            f"  Side: {side:+.2f} ft ({side_d})\n"
+            f"  Height: {height:.2f} ft ({ht_d})")
+
+def lib_pitcher_arm_glove(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    arm   = (s["PlateLocSide"] > 0).sum()
+    glove = (s["PlateLocSide"] <= 0).sum()
+    total = len(s)
+    return (f"{s['Pitcher'].iloc[0]} arm/glove side ({pitch_type or 'all'}):\n"
+            f"  Arm side:   {_fmt(_pct(arm,total),'%')} ({arm})\n"
+            f"  Glove side: {_fmt(_pct(glove,total),'%')} ({glove})")
+
+def lib_location_chart(df, pitcher, pitch_type=None, batter_side=None):
+    """Strike zone scatter, colored by call type."""
+    import matplotlib.patches as mpatches
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if batter_side:
+        s = s[s["BatterSide"].str.lower().str.startswith(batter_side[0].lower())]
+    if s.empty: return "No data.", None
+    fig, ax = plt.subplots(figsize=(7, 8), facecolor=BG_COLOR)
+    _ax_style(ax)
+    zone = plt.Rectangle((_ZX1,_ZY1), _ZX2-_ZX1, _ZY2-_ZY1, lw=2, ec=TEXT_COLOR, fc="none")
+    ax.add_patch(zone)
+    # thirds
+    for y in [_ZY1+_ZY3, _ZY1+2*_ZY3]:
+        ax.axhline(y, color=GRID_COLOR, lw=0.5, ls="--", alpha=0.6)
+    colors = {"Ball":"#4488FF","StrikeCalled":"#FF4444","StrikeSwinging":"#FF4444",
+               "FoulBall":"#FFAA00","FoulBallNotFieldable":"#FFAA00","InPlay":"#44FF88","HitByPitch":"#FF00FF"}
+    markers = {"Ball":"o","StrikeCalled":"o","StrikeSwinging":"x",
+                "FoulBall":"^","FoulBallNotFieldable":"^","InPlay":"s","HitByPitch":"D"}
+    for call, clr in colors.items():
+        sub = s[s["PitchCall"]==call].dropna(subset=["PlateLocSide","PlateLocHeight"])
+        if not sub.empty:
+            ax.scatter(sub["PlateLocSide"], sub["PlateLocHeight"],
+                       c=clr, marker=markers.get(call,"o"), s=30, alpha=0.6, label=call)
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(0.5, 5.5)
+    ax.set_xlabel("Plate Side (ft) — Catcher View"); ax.set_ylabel("Height (ft)")
+    title = f"Location — {s['Pitcher'].iloc[0]}"
+    if pitch_type: title += f" ({pitch_type})"
+    if batter_side: title += f" vs {'LHB' if batter_side[0].lower()=='l' else 'RHB'}"
+    ax.set_title(title, fontweight="bold")
+    ax.legend(fontsize=7, frameon=False, labelcolor=TEXT_COLOR, loc="upper right")
+    fig.tight_layout()
+    return title, fig
+
+def lib_heatmap_chart(df, pitcher, pitch_type=None, batter_side=None):
+    """2D density heatmap of pitch locations."""
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if batter_side:
+        s = s[s["BatterSide"].str.lower().str.startswith(batter_side[0].lower())]
+    s = s.dropna(subset=["PlateLocSide","PlateLocHeight"])
+    if len(s) < 10: return "Not enough data.", None
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import LinearSegmentedColormap
+    fig, ax = plt.subplots(figsize=(7, 8), facecolor=BG_COLOR)
+    _ax_style(ax)
+    cmap = LinearSegmentedColormap.from_list("heat", ["#0F0F1A","#1a1a4a","#FF4444","#FFFF00"])
+    h, xedges, yedges = np.histogram2d(s["PlateLocSide"], s["PlateLocHeight"],
+                                        bins=30, range=[[-2.5,2.5],[0.5,5.5]])
+    h = h.T
+    ax.contourf(np.linspace(-2.5,2.5,30), np.linspace(0.5,5.5,30), h,
+                levels=15, cmap=cmap, alpha=0.85)
+    zone = plt.Rectangle((_ZX1,_ZY1), _ZX2-_ZX1, _ZY2-_ZY1, lw=2, ec="white", fc="none")
+    ax.add_patch(zone)
+    ax.set_xlabel("Plate Side (ft) — Catcher View"); ax.set_ylabel("Height (ft)")
+    title = f"Location Heatmap — {s['Pitcher'].iloc[0]}"
+    if pitch_type: title += f" ({pitch_type})"
+    ax.set_title(title, fontweight="bold")
+    fig.tight_layout()
+    return title, fig
+
+# ── PITCH MIX ─────────────────────────────────────────────────────────────────
+
+def lib_pitcher_pitch_mix(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    total = len(s)
+    lines = [f"Pitch mix — {s['Pitcher'].iloc[0]} ({total} pitches):"]
+    for pt, cnt in s["PitchType"].value_counts().items():
+        lines.append(f"  {pt}: {cnt} ({_fmt(_pct(cnt,total),'%')})")
+    return "\n".join(lines)
+
+def lib_pitcher_mix_vs_hand(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Pitch mix by batter hand — {s['Pitcher'].iloc[0]}:"]
+    for side, lbl in [("Left","vs LHB"),("Right","vs RHB")]:
+        g = s[s["BatterSide"]==side]; total = len(g)
+        if total == 0: continue
+        lines.append(f"  {lbl} ({total} pitches):")
+        for pt, cnt in g["PitchType"].value_counts().items():
+            lines.append(f"    {pt}: {cnt} ({_fmt(_pct(cnt,total),'%')})")
+    return "\n".join(lines)
+
+def lib_pitcher_mix_by_count(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    s = s.copy(); s["Count"] = s["Balls"].astype(str)+"-"+s["Strikes"].astype(str)
+    lines = [f"Pitch mix by count — {s['Pitcher'].iloc[0]}:"]
+    for cnt, g in s.groupby("Count"):
+        total = len(g)
+        top_pts = g["PitchType"].value_counts().head(3)
+        mix = ", ".join(f"{pt} {_fmt(_pct(c,total),'%')}" for pt,c in top_pts.items())
+        lines.append(f"  {cnt}: {total} pitches — {mix}")
+    return "\n".join(lines)
+
+def lib_pitcher_mix_by_inning(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Pitch mix by inning — {s['Pitcher'].iloc[0]}:"]
+    for inn, g in s.groupby("Inning"):
+        total = len(g)
+        top = g["PitchType"].value_counts().head(3)
+        mix = ", ".join(f"{pt} {_fmt(_pct(c,total),'%')}" for pt,c in top.items())
+        lines.append(f"  Inning {int(inn)}: {total} pitches — {mix}")
+    return "\n".join(lines)
+
+def lib_pitch_mix_chart(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    counts = s["PitchType"].value_counts()
+    fig, ax = plt.subplots(figsize=(8, 8), facecolor=BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+    wedges, texts, autotexts = ax.pie(
+        counts.values, labels=counts.index,
+        colors=[pc(pt) for pt in counts.index],
+        autopct="%1.1f%%", startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth":1.5})
+    for t in texts: t.set_color(TEXT_COLOR); t.set_fontsize(11)
+    for at in autotexts: at.set_color("white"); at.set_fontsize(10); at.set_fontweight("bold")
+    ax.set_title(f"Pitch Mix — {s['Pitcher'].iloc[0]}", fontsize=13, fontweight="bold", color=TEXT_COLOR)
+    fig.tight_layout()
+    return f"Pitch mix — {s['Pitcher'].iloc[0]}", fig
+
+def lib_team_pitch_mix(df, team):
+    s = _find_team(df, team)
+    if s.empty: return "Not found."
+    total = len(s)
+    lines = [f"Pitch mix — {team} ({total} pitches):"]
+    for pt, cnt in s["PitchType"].value_counts().items():
+        lines.append(f"  {pt}: {cnt} ({_fmt(_pct(cnt,total),'%')})")
+    return "\n".join(lines)
+
+# ── OUTCOMES / RESULTS ────────────────────────────────────────────────────────
+
+def lib_pitcher_k_pct(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    pa = _pa_count(s); k = (s["KorBB"]=="Strikeout").sum()
+    return f"{s['Pitcher'].iloc[0]} K%: {_fmt(_pct(k,pa),'%')} ({k}K / {pa} PA)"
+
+def lib_pitcher_bb_pct(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    pa = _pa_count(s); bb = (s["KorBB"]=="Walk").sum()
+    return f"{s['Pitcher'].iloc[0]} BB%: {_fmt(_pct(bb,pa),'%')} ({bb}BB / {pa} PA)"
+
+def lib_pitcher_k_bb(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    pa = _pa_count(s)
+    k  = (s["KorBB"]=="Strikeout").sum()
+    bb = (s["KorBB"]=="Walk").sum()
+    k_pct  = _pct(k,pa); bb_pct = _pct(bb,pa)
+    k_bb   = round(k_pct-bb_pct,1) if k_pct and bb_pct else None
+    return (f"{s['Pitcher'].iloc[0]} K/BB ({pa} PA):\n"
+            f"  K%: {_fmt(k_pct,'%')} ({k})  BB%: {_fmt(bb_pct,'%')} ({bb})  K-BB%: {_fmt(k_bb,'%')}")
+
+def lib_pitcher_ip(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    outs = _count_outs(s)
+    return f"{s['Pitcher'].iloc[0]} innings pitched: {_ip_str(outs)} ({outs} outs)"
+
+def lib_pitcher_hits(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    h  = s["PlayResult"].isin(_HIT_RESULTS).sum()
+    hr = (s["PlayResult"]=="HomeRun").sum()
+    si = (s["PlayResult"]=="Single").sum()
+    do = (s["PlayResult"]=="Double").sum()
+    tr = (s["PlayResult"]=="Triple").sum()
+    return (f"{s['Pitcher'].iloc[0]} hits allowed: {h} total\n"
+            f"  1B:{si}  2B:{do}  3B:{tr}  HR:{hr}")
+
+def lib_pitcher_hr(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    hr = (s["PlayResult"]=="HomeRun").sum()
+    return f"{s['Pitcher'].iloc[0]} home runs allowed: {hr}"
+
+def lib_pitcher_hbp(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    hbp = (s["PitchCall"]=="HitByPitch").sum()
+    return f"{s['Pitcher'].iloc[0]} HBP: {hbp}"
+
+def lib_pitcher_xwoba(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    xw = s["xwOBA"].dropna() if "xwOBA" in s.columns else pd.Series([], dtype=float)
+    if xw.empty: return "No xwOBA data."
+    return f"{s['Pitcher'].iloc[0]} xwOBA ({pitch_type or 'all'}): {xw.mean():.3f} ({len(xw)} events)"
+
+def lib_pitcher_xwoba_by_pitch(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty or "xwOBA" not in s.columns: return "No xwOBA data."
+    lines = [f"xwOBA by pitch — {s['Pitcher'].iloc[0]}:"]
+    for pt, g in s.groupby("PitchType"):
+        xw = g["xwOBA"].dropna()
+        if not xw.empty:
+            lines.append(f"  {pt}: {xw.mean():.3f} ({len(xw)} events)")
+    return "\n".join(lines)
+
+def lib_pitcher_hard_hit(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    ip = s[s["PitchCall"]=="InPlay"]
+    ev = ip["ExitSpeed"].dropna()
+    if ev.empty: return "No exit velo data."
+    hh = (ev>=95).sum()
+    return (f"{s['Pitcher'].iloc[0]} hard hit allowed:\n"
+            f"  Avg EV: {ev.mean():.1f} mph | Max: {ev.max():.1f} | Hard hit% (95+): {_fmt(_pct(hh,len(ev)),'%')}")
+
+def lib_pitcher_gb_fb(df, pitcher):
+    """Ground ball / fly ball rate based on launch angle."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    ip = s[s["PitchCall"]=="InPlay"]
+    la = ip["LaunchAngle"].dropna()
+    if la.empty: return "No launch angle data."
+    gb = (la < 10).sum(); ld = ((la>=10)&(la<=25)).sum(); fb = (la>25).sum()
+    total = len(la)
+    return (f"{s['Pitcher'].iloc[0]} batted ball profile:\n"
+            f"  GB% (<10°):     {_fmt(_pct(gb,total),'%')}\n"
+            f"  LD% (10-25°):   {_fmt(_pct(ld,total),'%')}\n"
+            f"  FB% (>25°):     {_fmt(_pct(fb,total),'%')}\n"
+            f"  Avg LA: {la.mean():.1f}°")
+
+def lib_pitcher_full_summary(df, pitcher):
+    """Everything at once."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Pitcher not found."
+    name = s["Pitcher"].iloc[0]
+    pa   = _pa_count(s); outs = _count_outs(s)
+    k    = (s["KorBB"]=="Strikeout").sum(); bb = (s["KorBB"]=="Walk").sum()
+    sw   = s["PitchCall"].isin(_SWING_CALLS).sum()
+    wh   = (s["PitchCall"]=="StrikeSwinging").sum()
+    iz   = _iz(s); ooz = s[~iz]
+    ooz_sw = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+    velo = s["RelSpeed"].dropna()
+    return (f"=== {name} Full Summary ===\n"
+            f"Total pitches: {len(s)}  |  IP: {_ip_str(outs)}  |  PA: {pa}\n"
+            f"K%: {_fmt(_pct(k,pa),'%')}  BB%: {_fmt(_pct(bb,pa),'%')}  K-BB%: {_fmt(_pct(k,pa)-_pct(bb,pa) if _pct(k,pa) and _pct(bb,pa) else None,'%')}\n"
+            f"Avg velo: {_fmt(velo.mean(),' mph')}  Max: {_fmt(velo.max(),' mph')}\n"
+            f"Zone%: {_fmt(_pct(iz.sum(),len(s)),'%')}  Whiff%: {_fmt(_pct(wh,sw),'%')}  Chase%: {_fmt(_pct(ooz_sw,len(ooz)),'%')}\n"
+            f"CSW%: {_fmt(_pct(s['PitchCall'].isin(['StrikeCalled','StrikeSwinging']).sum(),len(s)),'%')}")
+
+# ── SPLITS ────────────────────────────────────────────────────────────────────
+
+def lib_pitcher_hand_splits(df, pitcher, stats=None):
+    """Full split breakdown vs LHB and RHB."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"LHB/RHB splits — {s['Pitcher'].iloc[0]}:"]
+    for side, lbl in [("Left","vs LHB"),("Right","vs RHB")]:
+        g = s[s["BatterSide"]==side]
+        if g.empty: continue
+        pa = _pa_count(g); k = (g["KorBB"]=="Strikeout").sum(); bb = (g["KorBB"]=="Walk").sum()
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum(); wh = (g["PitchCall"]=="StrikeSwinging").sum()
+        iz = _iz(g); ooz = g[~iz]; ooz_sw = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+        velo = g["RelSpeed"].dropna()
+        lines.append(f"  {lbl} ({len(g)} pitches, {pa} PA):")
+        lines.append(f"    Velo: {_fmt(velo.mean(),' mph')} | K%: {_fmt(_pct(k,pa),'%')} | BB%: {_fmt(_pct(bb,pa),'%')}")
+        lines.append(f"    Whiff%: {_fmt(_pct(wh,sw),'%')} | Zone%: {_fmt(_pct(iz.sum(),len(g)),'%')} | Chase%: {_fmt(_pct(ooz_sw,len(ooz)),'%')}")
+    return "\n".join(lines)
+
+def lib_pitcher_count_splits(df, pitcher, pitch_type=None):
+    s = _fp(_find_pitcher(df, pitcher), pitch_type)
+    if s.empty: return "No data."
+    s = s.copy(); s["Count"] = s["Balls"].astype(str)+"-"+s["Strikes"].astype(str)
+    lines = [f"Count splits — {s['Pitcher'].iloc[0]} ({pitch_type or 'all'}):"]
+    for cnt, g in sorted(s.groupby("Count"), key=lambda x: x[0]):
+        sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (g["PitchCall"]=="StrikeSwinging").sum()
+        iz = _iz(g).sum()
+        velo = g["RelSpeed"].dropna().mean()
+        lines.append(f"  {cnt}: {len(g)} pitches | velo {_fmt(velo,' mph')} | zone {_fmt(_pct(iz,len(g)),'%')} | whiff {_fmt(_pct(wh,sw),'%')}")
+    return "\n".join(lines)
+
+def lib_pitcher_risp_splits(df, pitcher):
+    """Performance with runners in scoring position (2-strike or RISP proxy via count)."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    two_str = s[s["Strikes"]==2]
+    non_two = s[s["Strikes"]!=2]
+    lines = [f"Two-strike vs non two-strike — {s['Pitcher'].iloc[0]}:"]
+    for subset, lbl in [(two_str,"2-strike counts"),(non_two,"Non-2-strike")]:
+        sw = subset["PitchCall"].isin(_SWING_CALLS).sum()
+        wh = (subset["PitchCall"]=="StrikeSwinging").sum()
+        iz = _iz(subset).sum()
+        ooz = subset[~_iz(subset)]; ooz_sw = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+        lines.append(f"  {lbl} ({len(subset)} pitches):")
+        lines.append(f"    Whiff%: {_fmt(_pct(wh,sw),'%')} | Zone%: {_fmt(_pct(iz,len(subset)),'%')} | Chase%: {_fmt(_pct(ooz_sw,len(ooz)),'%')}")
+    return "\n".join(lines)
+
+def lib_pitcher_outing_log(df, pitcher):
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found."
+    lines = [f"Outing log — {s['Pitcher'].iloc[0]}:"]
+    for gd, g in s.groupby("GameDate"):
+        outs = _count_outs(g)
+        k    = (g["KorBB"]=="Strikeout").sum(); bb = (g["KorBB"]=="Walk").sum()
+        velo = g["RelSpeed"].dropna()
+        sw   = g["PitchCall"].isin(_SWING_CALLS).sum(); wh = (g["PitchCall"]=="StrikeSwinging").sum()
+        opp_teams = g["HomeTeam"].unique().tolist() + g["AwayTeam"].unique().tolist()
+        opp = [t for t in opp_teams if "LIU" not in str(t) and str(t).strip()]
+        lines.append(f"  {gd}: {_ip_str(outs)} IP | {len(g)} pitches | "
+                     f"{_fmt(velo.mean(),' mph')} avg | {k}K {bb}BB | whiff {_fmt(_pct(wh,sw),'%')}")
+    return "\n".join(lines)
+
+# ── TEAM STATS ─────────────────────────────────────────────────────────────────
+
+def lib_team_summary(df, team):
+    s = _find_team(df, team)
+    if s.empty: return "Team not found."
+    pa = _pa_count(s); outs = _count_outs(s)
+    k  = (s["KorBB"]=="Strikeout").sum(); bb = (s["KorBB"]=="Walk").sum()
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum(); wh = (s["PitchCall"]=="StrikeSwinging").sum()
+    iz = _iz(s); ooz = s[~iz]; ooz_sw = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+    velo = s["RelSpeed"].dropna()
+    return (f"=== {team} Pitching Summary ===\n"
+            f"Pitches: {len(s)} | IP: {_ip_str(outs)} | PA: {pa}\n"
+            f"K%: {_fmt(_pct(k,pa),'%')} | BB%: {_fmt(_pct(bb,pa),'%')}\n"
+            f"Avg velo: {_fmt(velo.mean(),' mph')} | Max: {_fmt(velo.max(),' mph')}\n"
+            f"Zone%: {_fmt(_pct(iz.sum(),len(s)),'%')} | Whiff%: {_fmt(_pct(wh,sw),'%')} | Chase%: {_fmt(_pct(ooz_sw,len(ooz)),'%')}")
+
+def lib_team_walks(df, team):
+    s = _find_team(df, team)
+    bb = (s["KorBB"]=="Walk").sum()
+    return f"{team} walks issued: {bb}"
+
+def lib_team_strikeouts(df, team):
+    s = _find_team(df, team)
+    k = (s["KorBB"]=="Strikeout").sum()
+    return f"{team} strikeouts: {k}"
+
+def lib_team_ip(df, team):
+    s = _find_team(df, team)
+    if s.empty: return "Not found."
+    outs = _count_outs(s)
+    return f"{team} innings pitched: {_ip_str(outs)}"
+
+def lib_team_leaderboard(df, team, stat="whiff", n=10):
+    s = _find_team(df, team)
+    if s.empty: return "Not found."
+    rows = []
+    for p, g in s.groupby("Pitcher"):
+        if len(g) < 15: continue
+        if stat=="whiff":
+            sw = g["PitchCall"].isin(_SWING_CALLS).sum(); wh = (g["PitchCall"]=="StrikeSwinging").sum()
+            val = _pct(wh, sw)
+        elif stat=="velo":   val = g["RelSpeed"].dropna().mean()
+        elif stat=="zone":   val = _pct(_iz(g).sum(), len(g))
+        elif stat=="chase":
+            ooz = g[~_iz(g)]; val = _pct(ooz["PitchCall"].isin(_SWING_CALLS).sum(), len(ooz))
+        elif stat=="k_pct":
+            pa = _pa_count(g); k = (g["KorBB"]=="Strikeout").sum(); val = _pct(k,pa)
+        elif stat=="csw":
+            val = _pct(g["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum(), len(g))
+        elif stat=="ip":     val = _count_outs(g)
+        else: val = None
+        if val is not None: rows.append((p, val, len(g)))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    unit = "%" if stat not in ("velo","ip") else (" mph" if stat=="velo" else " outs")
+    lines = [f"{team} pitcher leaderboard — {stat}:"]
+    for p, v, n_p in rows[:n]:
+        lines.append(f"  {p}: {v:.1f}{unit} ({n_p} pitches)")
+    return "\n".join(lines)
+
+def lib_all_teams_leaderboard(df, stat="whiff", n=20, min_pitches=200):
+    all_teams = sorted(set(df["HomeTeam"].dropna()) | set(df["AwayTeam"].dropna()))
+    rows = []
+    for team in all_teams:
+        s = _find_team(df, team)
+        if len(s) < min_pitches: continue
+        if stat=="whiff":
+            sw = s["PitchCall"].isin(_SWING_CALLS).sum(); wh = (s["PitchCall"]=="StrikeSwinging").sum()
+            val = _pct(wh, sw)
+        elif stat=="velo":   val = s["RelSpeed"].dropna().mean()
+        elif stat=="zone":   val = _pct(_iz(s).sum(), len(s))
+        elif stat=="chase":
+            ooz = s[~_iz(s)]; val = _pct(ooz["PitchCall"].isin(_SWING_CALLS).sum(), len(ooz))
+        elif stat=="k_pct":
+            pa = _pa_count(s); k = (s["KorBB"]=="Strikeout").sum(); val = _pct(k,pa)
+        elif stat=="csw":
+            val = _pct(s["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum(), len(s))
+        elif stat=="xwoba":
+            xw = s["xwOBA"].dropna() if "xwOBA" in s.columns else pd.Series([],dtype=float)
+            val = xw.mean() if not xw.empty else None
+        else: val = None
+        if val is not None: rows.append((team, val))
+    rows.sort(key=lambda x: x[1], reverse=(stat!="xwoba"))
+    unit = "%" if stat in ("whiff","zone","chase","k_pct","csw") else (" mph" if stat=="velo" else "")
+    lines = [f"All-teams leaderboard — {stat} (top {n}, min {min_pitches} pitches):"]
+    for team, v in rows[:n]:
+        lines.append(f"  {team}: {v:.2f}{unit}")
+    return "\n".join(lines)
+
+def lib_conference_leaderboard_pitchers(df, stat="whiff", n=25, min_pitches=100):
+    """Individual pitcher leaderboard across all teams."""
+    rows = []
+    for p, g in df.groupby("Pitcher"):
+        if len(g) < min_pitches: continue
+        if stat=="whiff":
+            sw = g["PitchCall"].isin(_SWING_CALLS).sum(); wh = (g["PitchCall"]=="StrikeSwinging").sum()
+            val = _pct(wh, sw)
+        elif stat=="velo":   val = g["RelSpeed"].dropna().mean()
+        elif stat=="zone":   val = _pct(_iz(g).sum(), len(g))
+        elif stat=="chase":
+            ooz = g[~_iz(g)]; val = _pct(ooz["PitchCall"].isin(_SWING_CALLS).sum(), len(ooz))
+        elif stat=="k_pct":
+            pa = _pa_count(g); k = (g["KorBB"]=="Strikeout").sum(); val = _pct(k,pa)
+        elif stat=="csw":
+            val = _pct(g["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum(), len(g))
+        elif stat=="ip":     val = _count_outs(g) / 3
+        elif stat=="xwoba":
+            xw = g["xwOBA"].dropna() if "xwOBA" in g.columns else pd.Series([],dtype=float)
+            val = xw.mean() if not xw.empty else None
+        else: val = None
+        if val is not None: rows.append((p, val, len(g)))
+    rows.sort(key=lambda x: x[1], reverse=(stat not in ("xwoba",)))
+    unit = "%" if stat in ("whiff","zone","chase","k_pct","csw") else (" mph" if stat=="velo" else (" IP" if stat=="ip" else ""))
+    lines = [f"D1 pitcher leaderboard — {stat} (top {n}, min {min_pitches} pitches):"]
+    for p, v, np_ in rows[:n]:
+        lines.append(f"  {p}: {v:.2f}{unit} ({np_} pitches)")
+    return "\n".join(lines)
+
+# ── HITTING / BATTER ──────────────────────────────────────────────────────────
+
+def lib_batter_exit_velo(df, batter):
+    s = _find_batter(df, batter)
+    if s.empty: return "Batter not found."
+    ip = s[s["PitchCall"]=="InPlay"]
+    ev = ip["ExitSpeed"].dropna()
+    if ev.empty: return "No exit velocity data."
+    name = s["Batter"].iloc[0]
+    hh = (ev>=95).sum()
+    return (f"{name} exit velocity:\n"
+            f"  Max EV: {ev.max():.1f} mph\n"
+            f"  Avg EV: {ev.mean():.1f} mph\n"
+            f"  Hard hit% (95+ mph): {_fmt(_pct(hh,len(ev)),'%')} ({hh}/{len(ev)})\n"
+            f"  Barrel (98+ mph, 26-30° LA): see launch angle breakdown")
+
+def lib_batter_launch_angle(df, batter):
+    s = _find_batter(df, batter)
+    if s.empty: return "Batter not found."
+    ip = s[s["PitchCall"]=="InPlay"]
+    la = ip["LaunchAngle"].dropna()
+    if la.empty: return "No launch angle data."
+    name = s["Batter"].iloc[0]
+    gb = (la<10).sum(); ld = ((la>=10)&(la<=25)).sum(); fb = (la>25).sum()
+    return (f"{name} batted ball profile:\n"
+            f"  Avg LA: {la.mean():.1f}°\n"
+            f"  GB% (<10°):   {_fmt(_pct(gb,len(la)),'%')}\n"
+            f"  LD% (10-25°): {_fmt(_pct(ld,len(la)),'%')}\n"
+            f"  FB% (>25°):   {_fmt(_pct(fb,len(la)),'%')}")
+
+def lib_batter_whiff_pct(df, batter):
+    s = _find_batter(df, batter)
+    if s.empty: return "Batter not found."
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum()
+    wh = (s["PitchCall"]=="StrikeSwinging").sum()
+    name = s["Batter"].iloc[0]
+    return f"{name} whiff%: {_fmt(_pct(wh,sw),'%')} ({wh}/{sw} swings)"
+
+def lib_batter_chase_pct(df, batter):
+    s = _find_batter(df, batter)
+    if s.empty: return "Batter not found."
+    name = s["Batter"].iloc[0]
+    ooz = s[~_iz(s)]
+    sw  = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+    return f"{name} chase%: {_fmt(_pct(sw,len(ooz)),'%')} ({sw}/{len(ooz)} OOZ pitches)"
+
+def lib_batter_k_bb(df, batter):
+    s = _find_batter(df, batter)
+    if s.empty: return "Batter not found."
+    name = s["Batter"].iloc[0]
+    pa = _pa_count(s)
+    k  = (s["KorBB"]=="Strikeout").sum(); bb = (s["KorBB"]=="Walk").sum()
+    return (f"{name} K/BB:\n"
+            f"  K%: {_fmt(_pct(k,pa),'%')} ({k}K)  BB%: {_fmt(_pct(bb,pa),'%')} ({bb}BB)  in {pa} PA")
+
+def lib_team_batting_summary(df, team):
+    """How a team performed AS BATTERS."""
+    s = _find_team_batting(df, team)
+    if s.empty: return "Not found."
+    pa = _pa_count(s)
+    k  = (s["KorBB"]=="Strikeout").sum(); bb = (s["KorBB"]=="Walk").sum()
+    h  = s["PlayResult"].isin(_HIT_RESULTS).sum()
+    hr = (s["PlayResult"]=="HomeRun").sum()
+    sw = s["PitchCall"].isin(_SWING_CALLS).sum(); wh = (s["PitchCall"]=="StrikeSwinging").sum()
+    ooz = s[~_iz(s)]; ooz_sw = ooz["PitchCall"].isin(_SWING_CALLS).sum()
+    ip = s[s["PitchCall"]=="InPlay"]; ev = ip["ExitSpeed"].dropna()
+    return (f"=== {team} Batting Summary ===\n"
+            f"PA: {pa} | K%: {_fmt(_pct(k,pa),'%')} | BB%: {_fmt(_pct(bb,pa),'%')}\n"
+            f"Hits: {h} | HR: {hr}\n"
+            f"Whiff%: {_fmt(_pct(wh,sw),'%')} | Chase%: {_fmt(_pct(ooz_sw,len(ooz)),'%')}\n"
+            f"Avg EV: {_fmt(ev.mean(),' mph') if not ev.empty else 'N/A'} | Hard hit%: {_fmt(_pct((ev>=95).sum(),len(ev)),'%') if not ev.empty else 'N/A'}")
+
+def lib_team_hard_hit(df, team):
+    s = _find_team(df, team)
+    ip = s[s["PitchCall"]=="InPlay"]; ev = ip["ExitSpeed"].dropna()
+    if ev.empty: return "No exit velocity data."
+    hh = (ev>=95).sum()
+    return f"{team} hard hit% allowed (95+ mph): {_fmt(_pct(hh,len(ev)),'%')} ({hh}/{len(ev)})"
+
+# ── TRENDS / OUTING-BY-OUTING ─────────────────────────────────────────────────
+
+def lib_pitcher_outing_chart(df, pitcher, stat="velo"):
+    """Line chart of a stat outing by outing."""
+    s = _find_pitcher(df, pitcher)
+    if s.empty: return "Not found.", None
+    rows = []
+    for gd, g in s.groupby("GameDate"):
+        if stat=="velo":
+            val = g["RelSpeed"].dropna().mean()
+        elif stat=="whiff":
+            sw = g["PitchCall"].isin(_SWING_CALLS).sum()
+            wh = (g["PitchCall"]=="StrikeSwinging").sum()
+            val = _pct(wh, sw)
+        elif stat=="zone":
+            val = _pct(_iz(g).sum(), len(g))
+        elif stat=="chase":
+            ooz = g[~_iz(g)]
+            val = _pct(ooz["PitchCall"].isin(_SWING_CALLS).sum(), len(ooz))
+        elif stat=="csw":
+            val = _pct(g["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum(), len(g))
+        else: val = None
+        if val is not None and not pd.isna(val):
+            rows.append({"d": str(gd), "val": val})
+    if len(rows) < 2: return "Not enough outings.", None
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=BG_COLOR)
+    _ax_style(ax)
+    dates = [r["d"] for r in rows]; vals = [r["val"] for r in rows]
+    ax.plot(dates, vals, marker="o", color=ACCENT_COLOR, lw=2.5, ms=8)
+    for d, v in zip(dates, vals):
+        unit = " mph" if stat=="velo" else "%"
+        ax.annotate(f"{v:.1f}{unit}", (d, v), textcoords="offset points",
+                    xytext=(0,10), fontsize=8, color=TEXT_COLOR, ha="center")
+    unit_label = "mph" if stat=="velo" else "%"
+    ax.set_ylabel(f"{stat.upper()} ({unit_label})")
+    ax.set_title(f"{stat.upper()} Trend — {s['Pitcher'].iloc[0]}", fontweight="bold")
+    plt.xticks(rotation=30, ha="right"); fig.tight_layout()
+    return f"{stat} trend — {s['Pitcher'].iloc[0]}", fig
+
+# ── COMPARISON ────────────────────────────────────────────────────────────────
+
+def lib_compare_pitchers(df, pitcher1, pitcher2, stat="whiff"):
+    """Side-by-side stat comparison of two pitchers."""
+    def get_val(s, stat):
+        if stat=="whiff":
+            sw = s["PitchCall"].isin(_SWING_CALLS).sum()
+            wh = (s["PitchCall"]=="StrikeSwinging").sum()
+            return _pct(wh, sw), "%"
+        elif stat=="velo": return s["RelSpeed"].dropna().mean(), " mph"
+        elif stat=="zone": return _pct(_iz(s).sum(), len(s)), "%"
+        elif stat=="chase":
+            ooz = s[~_iz(s)]; return _pct(ooz["PitchCall"].isin(_SWING_CALLS).sum(), len(ooz)), "%"
+        elif stat=="k_pct":
+            pa = _pa_count(s); return _pct((s["KorBB"]=="Strikeout").sum(), pa), "%"
+        elif stat=="csw": return _pct(s["PitchCall"].isin(["StrikeCalled","StrikeSwinging"]).sum(), len(s)), "%"
+        return None, ""
+    s1 = _find_pitcher(df, pitcher1); s2 = _find_pitcher(df, pitcher2)
+    if s1.empty or s2.empty: return "One or both pitchers not found."
+    n1 = s1["Pitcher"].iloc[0]; n2 = s2["Pitcher"].iloc[0]
+    v1, u = get_val(s1, stat); v2, _ = get_val(s2, stat)
+    winner = n1 if (v1 or 0) > (v2 or 0) else n2
+    return (f"Comparison — {stat}:\n"
+            f"  {n1}: {_fmt(v1)}{u}\n"
+            f"  {n2}: {_fmt(v2)}{u}\n"
+            f"  → {winner} leads")
+
+def lib_compare_pitchers_full(df, pitcher1, pitcher2):
+    """Full multi-stat comparison."""
+    s1 = _find_pitcher(df, pitcher1); s2 = _find_pitcher(df, pitcher2)
+    if s1.empty or s2.empty: return "One or both pitchers not found."
+    n1 = s1["Pitcher"].iloc[0]; n2 = s2["Pitcher"].iloc[0]
+    lines = [f"Full comparison — {n1} vs {n2}:"]
+    stats = [
+        ("Avg Velo", lambda s: f"{s['RelSpeed'].dropna().mean():.1f} mph"),
+        ("Max Velo",  lambda s: f"{s['RelSpeed'].dropna().max():.1f} mph"),
+        ("Whiff%",    lambda s: f"{_fmt(_pct(( s['PitchCall']=='StrikeSwinging').sum(), s['PitchCall'].isin(_SWING_CALLS).sum()),'%')}"),
+        ("Zone%",     lambda s: f"{_fmt(_pct(_iz(s).sum(), len(s)),'%')}"),
+        ("Chase%",    lambda s: f"{_fmt(_pct(s[~_iz(s)]['PitchCall'].isin(_SWING_CALLS).sum(), len(s[~_iz(s)])),'%')}"),
+        ("CSW%",      lambda s: f"{_fmt(_pct(s['PitchCall'].isin(['StrikeCalled','StrikeSwinging']).sum(), len(s)),'%')}"),
+        ("K%",        lambda s: f"{_fmt(_pct((s['KorBB']=='Strikeout').sum(), _pa_count(s)),'%')}"),
+        ("BB%",       lambda s: f"{_fmt(_pct((s['KorBB']=='Walk').sum(), _pa_count(s)),'%')}"),
+        ("IP",        lambda s: _ip_str(_count_outs(s))),
+    ]
+    lines.append(f"  {'Stat':<12} {'':>2} {n1:<25} {n2:<25}")
+    lines.append(f"  {'-'*70}")
+    for lbl, fn in stats:
+        try: v1 = fn(s1)
+        except: v1 = "N/A"
+        try: v2 = fn(s2)
+        except: v2 = "N/A"
+        lines.append(f"  {lbl:<12}    {v1:<25} {v2:<25}")
+    return "\n".join(lines)
+
+# ── FUNCTION REGISTRY & DOCS ──────────────────────────────────────────────────
+
+_AI_FUNCTIONS = {
+    # VELOCITY
+    "lib_pitcher_avg_velo":       lib_pitcher_avg_velo,
+    "lib_pitcher_max_velo":       lib_pitcher_max_velo,
+    "lib_pitcher_velo_by_pitch":  lib_pitcher_velo_by_pitch,
+    "lib_pitcher_velo_spread":    lib_pitcher_velo_spread,
+    "lib_pitcher_velo_by_inning": lib_pitcher_velo_by_inning,
+    "lib_pitcher_velo_trend":     lib_pitcher_velo_trend,
+    "lib_velo_chart":             lib_velo_chart,
+    "lib_team_avg_velo":          lib_team_avg_velo,
+    "lib_top_velo_pitchers":      lib_top_velo_pitchers,
+    # SPIN / SHAPE / MOVEMENT
+    "lib_pitcher_spin":             lib_pitcher_spin,
+    "lib_pitcher_spin_by_pitch":    lib_pitcher_spin_by_pitch,
+    "lib_pitcher_movement":         lib_pitcher_movement,
+    "lib_pitcher_movement_by_pitch":lib_pitcher_movement_by_pitch,
+    "lib_movement_chart":           lib_movement_chart,
+    "lib_pitcher_extension":        lib_pitcher_extension,
+    "lib_pitcher_release_point":    lib_pitcher_release_point,
+    "lib_release_point_chart":      lib_release_point_chart,
+    "lib_pitcher_vaa":              lib_pitcher_vaa,
+    "lib_pitcher_vaa_by_pitch":     lib_pitcher_vaa_by_pitch,
+    # WHIFF / SWING
+    "lib_pitcher_whiff":          lib_pitcher_whiff,
+    "lib_pitcher_whiff_by_pitch": lib_pitcher_whiff_by_pitch,
+    "lib_pitcher_whiff_vs_hand":  lib_pitcher_whiff_vs_hand,
+    "lib_pitcher_whiff_trend":    lib_pitcher_whiff_trend,
+    "lib_whiff_chart":            lib_whiff_chart,
+    "lib_pitcher_swing_pct":      lib_pitcher_swing_pct,
+    "lib_pitcher_contact_pct":    lib_pitcher_contact_pct,
+    "lib_team_whiff":             lib_team_whiff,
+    "lib_top_whiff_pitchers":     lib_top_whiff_pitchers,
+    # ZONE / CHASE / LOCATION
+    "lib_pitcher_zone_pct":           lib_pitcher_zone_pct,
+    "lib_pitcher_zone_by_pitch":      lib_pitcher_zone_by_pitch,
+    "lib_pitcher_chase_pct":          lib_pitcher_chase_pct,
+    "lib_pitcher_chase_by_pitch":     lib_pitcher_chase_by_pitch,
+    "lib_pitcher_iz_whiff":           lib_pitcher_iz_whiff,
+    "lib_pitcher_csw":                lib_pitcher_csw,
+    "lib_pitcher_csw_by_pitch":       lib_pitcher_csw_by_pitch,
+    "lib_pitcher_called_strike_pct":  lib_pitcher_called_strike_pct,
+    "lib_pitcher_strike_pct":         lib_pitcher_strike_pct,
+    "lib_pitcher_first_pitch_strike": lib_pitcher_first_pitch_strike,
+    "lib_pitcher_zone_thirds":        lib_pitcher_zone_thirds,
+    "lib_pitcher_zone_thirds_inzone": lib_pitcher_zone_thirds_inzone,
+    "lib_pitcher_miss_direction":     lib_pitcher_miss_direction,
+    "lib_pitcher_avg_location":       lib_pitcher_avg_location,
+    "lib_pitcher_arm_glove":          lib_pitcher_arm_glove,
+    "lib_location_chart":             lib_location_chart,
+    "lib_heatmap_chart":              lib_heatmap_chart,
+    # PITCH MIX
+    "lib_pitcher_pitch_mix":     lib_pitcher_pitch_mix,
+    "lib_pitcher_mix_vs_hand":   lib_pitcher_mix_vs_hand,
+    "lib_pitcher_mix_by_count":  lib_pitcher_mix_by_count,
+    "lib_pitcher_mix_by_inning": lib_pitcher_mix_by_inning,
+    "lib_pitch_mix_chart":       lib_pitch_mix_chart,
+    "lib_team_pitch_mix":        lib_team_pitch_mix,
+    # OUTCOMES
+    "lib_pitcher_k_pct":      lib_pitcher_k_pct,
+    "lib_pitcher_bb_pct":     lib_pitcher_bb_pct,
+    "lib_pitcher_k_bb":       lib_pitcher_k_bb,
+    "lib_pitcher_ip":         lib_pitcher_ip,
+    "lib_pitcher_hits":       lib_pitcher_hits,
+    "lib_pitcher_hr":         lib_pitcher_hr,
+    "lib_pitcher_hbp":        lib_pitcher_hbp,
+    "lib_pitcher_xwoba":      lib_pitcher_xwoba,
+    "lib_pitcher_xwoba_by_pitch": lib_pitcher_xwoba_by_pitch,
+    "lib_pitcher_hard_hit":   lib_pitcher_hard_hit,
+    "lib_pitcher_gb_fb":      lib_pitcher_gb_fb,
+    "lib_pitcher_full_summary": lib_pitcher_full_summary,
+    # SPLITS
+    "lib_pitcher_hand_splits":  lib_pitcher_hand_splits,
+    "lib_pitcher_count_splits": lib_pitcher_count_splits,
+    "lib_pitcher_risp_splits":  lib_pitcher_risp_splits,
+    "lib_pitcher_outing_log":   lib_pitcher_outing_log,
+    # TEAM
+    "lib_team_summary":                    lib_team_summary,
+    "lib_team_walks":                      lib_team_walks,
+    "lib_team_strikeouts":                 lib_team_strikeouts,
+    "lib_team_ip":                         lib_team_ip,
+    "lib_team_leaderboard":                lib_team_leaderboard,
+    "lib_all_teams_leaderboard":           lib_all_teams_leaderboard,
+    "lib_conference_leaderboard_pitchers": lib_conference_leaderboard_pitchers,
+    # HITTING / BATTER
+    "lib_batter_exit_velo":      lib_batter_exit_velo,
+    "lib_batter_launch_angle":   lib_batter_launch_angle,
+    "lib_batter_whiff_pct":      lib_batter_whiff_pct,
+    "lib_batter_chase_pct":      lib_batter_chase_pct,
+    "lib_batter_k_bb":           lib_batter_k_bb,
+    "lib_team_batting_summary":  lib_team_batting_summary,
+    "lib_team_hard_hit":         lib_team_hard_hit,
+    # TRENDS / CHARTS
+    "lib_pitcher_outing_chart":  lib_pitcher_outing_chart,
+    # COMPARISON
+    "lib_compare_pitchers":      lib_compare_pitchers,
+    "lib_compare_pitchers_full": lib_compare_pitchers_full,
+}
+
+_FUNCTION_DOCS = """
+PRE-BUILT FUNCTIONS — USE THESE FIRST before writing custom pandas code.
+All take `df` as the first argument. Functions returning charts return (text, fig).
+
+VELOCITY:
+  lib_pitcher_avg_velo(df, pitcher, pitch_type=None)
+  lib_pitcher_max_velo(df, pitcher, pitch_type=None)
+  lib_pitcher_velo_by_pitch(df, pitcher)
+  lib_pitcher_velo_spread(df, pitcher, pitch_type=None)       ← std dev, percentiles
+  lib_pitcher_velo_by_inning(df, pitcher, pitch_type=None)
+  lib_pitcher_velo_trend(df, pitcher, pitch_type=None)        ← chart
+  lib_velo_chart(df, pitcher)                                 ← violin chart
+  lib_team_avg_velo(df, team, pitch_type=None)
+  lib_top_velo_pitchers(df, n=15, pitch_type=None, min_n=30)
+
+SPIN / MOVEMENT / SHAPE:
+  lib_pitcher_spin(df, pitcher, pitch_type=None)
+  lib_pitcher_spin_by_pitch(df, pitcher)
+  lib_pitcher_movement(df, pitcher, pitch_type=None)          ← IVB + HB
+  lib_pitcher_movement_by_pitch(df, pitcher)
+  lib_movement_chart(df, pitcher)                             ← chart
+  lib_pitcher_extension(df, pitcher, pitch_type=None)
+  lib_pitcher_release_point(df, pitcher, pitch_type=None)
+  lib_release_point_chart(df, pitcher)                        ← chart
+  lib_pitcher_vaa(df, pitcher, pitch_type=None)               ← vert approach angle
+  lib_pitcher_vaa_by_pitch(df, pitcher)
+
+WHIFF / SWING / CONTACT:
+  lib_pitcher_whiff(df, pitcher, pitch_type=None)
+  lib_pitcher_whiff_by_pitch(df, pitcher)
+  lib_pitcher_whiff_vs_hand(df, pitcher, pitch_type=None)
+  lib_pitcher_whiff_trend(df, pitcher, pitch_type=None)       ← chart
+  lib_whiff_chart(df, pitcher)                                ← bar chart
+  lib_pitcher_swing_pct(df, pitcher, pitch_type=None)
+  lib_pitcher_contact_pct(df, pitcher, pitch_type=None)
+  lib_team_whiff(df, team, pitch_type=None)
+  lib_top_whiff_pitchers(df, n=15, pitch_type=None, min_swings=30)
+
+ZONE / CHASE / LOCATION:
+  lib_pitcher_zone_pct(df, pitcher, pitch_type=None)
+  lib_pitcher_zone_by_pitch(df, pitcher)
+  lib_pitcher_chase_pct(df, pitcher, pitch_type=None)
+  lib_pitcher_chase_by_pitch(df, pitcher)
+  lib_pitcher_iz_whiff(df, pitcher, pitch_type=None)          ← in-zone whiff
+  lib_pitcher_csw(df, pitcher, pitch_type=None)               ← called strike + whiff %
+  lib_pitcher_csw_by_pitch(df, pitcher)
+  lib_pitcher_called_strike_pct(df, pitcher, pitch_type=None)
+  lib_pitcher_strike_pct(df, pitcher, pitch_type=None)
+  lib_pitcher_first_pitch_strike(df, pitcher)
+  lib_pitcher_zone_thirds(df, pitcher, pitch_type=None)       ← upper/mid/lower of ALL
+  lib_pitcher_zone_thirds_inzone(df, pitcher, pitch_type=None)← upper/mid/lower of IN-ZONE
+  lib_pitcher_miss_direction(df, pitcher, pitch_type=None)    ← high/low/arm/glove miss %
+  lib_pitcher_avg_location(df, pitcher, pitch_type=None)
+  lib_pitcher_arm_glove(df, pitcher, pitch_type=None)
+  lib_location_chart(df, pitcher, pitch_type=None, batter_side=None) ← scatter chart
+  lib_heatmap_chart(df, pitcher, pitch_type=None, batter_side=None)  ← density heatmap
+
+PITCH MIX:
+  lib_pitcher_pitch_mix(df, pitcher)
+  lib_pitcher_mix_vs_hand(df, pitcher)
+  lib_pitcher_mix_by_count(df, pitcher)
+  lib_pitcher_mix_by_inning(df, pitcher)
+  lib_pitch_mix_chart(df, pitcher)                            ← pie chart
+  lib_team_pitch_mix(df, team)
+
+OUTCOMES:
+  lib_pitcher_k_pct(df, pitcher)
+  lib_pitcher_bb_pct(df, pitcher)
+  lib_pitcher_k_bb(df, pitcher)
+  lib_pitcher_ip(df, pitcher)
+  lib_pitcher_hits(df, pitcher)
+  lib_pitcher_hr(df, pitcher)
+  lib_pitcher_hbp(df, pitcher)
+  lib_pitcher_xwoba(df, pitcher, pitch_type=None)
+  lib_pitcher_xwoba_by_pitch(df, pitcher)
+  lib_pitcher_hard_hit(df, pitcher)                           ← avg EV, hard hit%
+  lib_pitcher_gb_fb(df, pitcher)                              ← GB%/LD%/FB%
+  lib_pitcher_full_summary(df, pitcher)                       ← everything at once
+
+SPLITS:
+  lib_pitcher_hand_splits(df, pitcher)                        ← full LHB/RHB breakdown
+  lib_pitcher_count_splits(df, pitcher, pitch_type=None)
+  lib_pitcher_risp_splits(df, pitcher)                        ← 2-strike vs non
+  lib_pitcher_outing_log(df, pitcher)
+
+TEAM:
+  lib_team_summary(df, team)
+  lib_team_walks(df, team)
+  lib_team_strikeouts(df, team)
+  lib_team_ip(df, team)
+  lib_team_leaderboard(df, team, stat, n=10)  stat: whiff/velo/zone/chase/k_pct/csw/ip
+  lib_all_teams_leaderboard(df, stat, n=20)   stat: whiff/velo/zone/chase/k_pct/csw/xwoba
+  lib_conference_leaderboard_pitchers(df, stat, n=25, min_pitches=100)  ← all D1 pitchers
+
+HITTING / BATTER:
+  lib_batter_exit_velo(df, batter)
+  lib_batter_launch_angle(df, batter)
+  lib_batter_whiff_pct(df, batter)
+  lib_batter_chase_pct(df, batter)
+  lib_batter_k_bb(df, batter)
+  lib_team_batting_summary(df, team)
+  lib_team_hard_hit(df, team)
+
+TRENDS / CHARTS:
+  lib_pitcher_outing_chart(df, pitcher, stat)  stat: velo/whiff/zone/chase/csw
+
+COMPARISON:
+  lib_compare_pitchers(df, p1, p2, stat)       ← single stat comparison
+  lib_compare_pitchers_full(df, p1, p2)        ← full table comparison
+
+CALLING CHART FUNCTIONS:
+  result, fig = lib_velo_chart(df, "Smith")
+
+PITCH TYPE ALIASES accepted: fastball/fb, sinker/two seam, cutter/cut,
+  slider/sl, curveball/curve/cb, changeup/change/ch, splitter/split, sweeper
+"""
+
+
 def get_df_schema(df):
     """Return a compact schema description for the AI."""
     lines = []
@@ -1021,28 +2418,21 @@ def get_df_schema(df):
     lines.append(f"Pitchers: {df['Pitcher'].nunique()} unique (format: 'Last, First')")
     lines.append(f"Pitch types: {sorted(df['PitchType'].dropna().unique().tolist())}")
     lines.append("")
-    lines.append("Columns and types:")
-    for col in df.columns:
-        lines.append(f"  {col}: {df[col].dtype} (sample: {df[col].dropna().iloc[0] if not df[col].dropna().empty else 'N/A'})")
-    lines.append("")
     lines.append("Key column notes:")
     lines.append("  - Pitcher names are 'Last, First' format")
     lines.append("  - TopBottom: 'Top' = away team batting (home team pitching), 'Bottom' = home team batting (away team pitching)")
     lines.append("  - PitchCall values: StrikeSwinging, StrikeCalled, Ball, FoulBall, FoulBallNotFieldable, InPlay, HitByPitch")
     lines.append("  - KorBB values: Strikeout, Walk (blank otherwise)")
     lines.append("  - PlayResult values: Single, Double, Triple, HomeRun, Out, Error, FieldersChoice, Sacrifice (blank otherwise)")
-    lines.append("  - SWING_CALLS = ['StrikeSwinging','FoulBall','FoulBallNotFieldable','InPlay']")
-    lines.append("  - Whiff% = StrikeSwinging / swings * 100")
-    lines.append("  - Chase% = swings on out-of-zone pitches / out-of-zone pitches * 100")
-    lines.append("  - Zone: PlateLocHeight between 1.5-3.5, PlateLocSide between -0.83 and 0.83")
+    lines.append("  - Zone: PlateLocHeight 1.5–3.5 ft, PlateLocSide -0.83–0.83 ft")
+    lines.append("  - InZone column: True/False precomputed")
     lines.append("  - xwOBA column available for in-play events")
-    lines.append("  - InZone column: True/False")
     return "\n".join(lines)
 
 
 def run_ai_code(code_str, df):
     """Safely execute AI-generated pandas code and return result."""
-    import io, traceback
+    import traceback
     local_vars = {
         "df": df,
         "pd": pd,
@@ -1059,6 +2449,8 @@ def run_ai_code(code_str, df):
         "PITCH_COLORS": PITCH_COLORS,
         "pc": pc,
     }
+    # Inject all library functions
+    local_vars.update(_AI_FUNCTIONS)
     try:
         exec(compile(code_str, "<ai_code>", "exec"), local_vars)
         return local_vars.get("result"), local_vars.get("fig"), None
@@ -1137,34 +2529,35 @@ with st.expander("🤖 AI Baseball Analyst", expanded=False):
 
         schema = st.session_state["df_schema"]
 
-        system_prompt = f"""You are an expert baseball data analyst. You have direct access to a pandas DataFrame called `df` containing college baseball TrackMan data.
+        system_prompt = f"""You are an expert baseball data analyst with access to a pandas DataFrame `df` of college baseball TrackMan data, and a large library of pre-built, tested analysis functions.
 
 DATAFRAME SCHEMA:
 {schema}
 
+{_FUNCTION_DOCS}
+
 YOUR JOB:
-1. Write Python/pandas code to answer the user's question
-2. Store the final answer in a variable called `result` (string)
-3. Optionally create a matplotlib figure stored in `fig` for visual questions
+1. ALWAYS prefer calling a pre-built lib_ function over writing custom pandas code — they are tested and accurate.
+2. Store the final answer in `result` (string).
+3. For chart functions that return (text, fig), assign both: `result, fig = lib_xyz(df, ...)`
+4. For non-chart functions, set `fig = None`.
+5. If no pre-built function fits, write clean pandas code yourself using the schema above.
 
 ALWAYS respond in this exact format:
-ANSWER: <1-2 sentence plain English answer here>
+ANSWER: <1-2 sentence plain English answer>
 CODE:
 ```python
-# your pandas code here
-result = "your answer as a string"
-fig = None  # or a matplotlib figure
+# prefer lib_ functions — they are accurate
+result = lib_pitcher_avg_velo(df, "Smith, John", "Fastball")
+fig = None
 ```
 
 RULES:
-- Always set result to a readable string answer
-- For charts, create fig using matplotlib. Style with: fig, ax = plt.subplots(figsize=(10,5), facecolor=BG_COLOR); ax.set_facecolor(PANEL_COLOR)
-- Use pitch colors with pc(pitch_type) for pitch-specific charts
-- Keep code simple and safe - no file I/O, no imports (pd, np, plt already available)
-- For pitcher queries, names are 'Last, First' - use str.contains() for fuzzy matching
-- For IP calculations: count outs recorded (KorBB=='Strikeout' or PlayResult in outs list) then divide by 3
-- Whiff% = (PitchCall=='StrikeSwinging').sum() / PitchCall.isin(['StrikeSwinging','FoulBall','FoulBallNotFieldable','InPlay']).sum() * 100
-- Zone% = InZone.sum() / len(s) * 100 (InZone column exists)"""
+- Pitcher names: fuzzy matching handles "John Smith" → finds "Smith, John" automatically
+- Pitch type aliases: fastball/fb, slider/sl, curveball/curve, changeup/change, sinker, cutter, sweeper, splitter
+- For charts: result, fig = lib_xyz(df, ...) — both must be assigned
+- No file I/O, no new imports (pd, np, plt already available)
+- Always set result to a non-empty string"""
 
         messages = [
             {"role": m["role"], "content": m["content"]}
