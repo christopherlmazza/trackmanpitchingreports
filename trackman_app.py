@@ -3506,6 +3506,10 @@ if report_mode == "🏏 Hitters":
         st.warning("No data for this selection."); st.stop()
 
     # ── Tabs ──
+    # Debug: show actual PitcherThrows values so we know what to filter on
+    _pt_vals = page_df["PitcherThrows"].dropna().unique().tolist() if "PitcherThrows" in page_df.columns else []
+    st.caption(f"DEBUG — PitcherThrows unique values: {_pt_vals} | total rows: {len(page_df)}")
+
     tab_card, tab_heatmaps = st.tabs(["📄 Hitter Card", "🔥 Heatmaps"])
 
     with tab_card:
