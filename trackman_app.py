@@ -1582,7 +1582,9 @@ def generate_hitter_heatmap(batter_df, metric="ev", pitch_type=None,
         ax.set_facecolor("#FFFFFF")
 
         if "PitcherThrows" in df.columns:
-            side_data = df[df["PitcherThrows"] == side]
+            # Handle both "Left"/"Right" and "L"/"R" values
+            short = side[0]  # "L" or "R"
+            side_data = df[df["PitcherThrows"].isin([side, short])]
         else:
             side_data = df
 
@@ -3459,6 +3461,17 @@ if report_mode == "🏏 Hitters":
         if r["PitchCall"] == "InPlay" else np.nan, axis=1)
     bat_df["InZone"] = in_zone(bat_df)
 
+    # PitcherThrows is often blank on batting rows — enrich from pitching rows
+    # which do have throwHand populated for the same pitchers
+    if bat_df["PitcherThrows"].str.strip().eq("").all():
+        _hand_lookup = (
+            df_all[df_all["PitcherThrows"].str.strip().ne("")]
+            .groupby("Pitcher")["PitcherThrows"]
+            .agg(lambda x: x.mode()[0] if not x.empty else "")
+            .to_dict()
+        )
+        bat_df["PitcherThrows"] = bat_df["Pitcher"].map(_hand_lookup).fillna("")
+
     # Games summary
     games_h = (bat_df.groupby(["GameDate","HomeTeam","AwayTeam"])
                .size().reset_index().sort_values("GameDate"))
@@ -3506,10 +3519,6 @@ if report_mode == "🏏 Hitters":
         st.warning("No data for this selection."); st.stop()
 
     # ── Tabs ──
-    # Debug: show actual PitcherThrows values so we know what to filter on
-    _pt_vals = page_df["PitcherThrows"].dropna().unique().tolist() if "PitcherThrows" in page_df.columns else []
-    st.caption(f"DEBUG — PitcherThrows unique values: {_pt_vals} | total rows: {len(page_df)}")
-
     tab_card, tab_heatmaps = st.tabs(["📄 Hitter Card", "🔥 Heatmaps"])
 
     with tab_card:
