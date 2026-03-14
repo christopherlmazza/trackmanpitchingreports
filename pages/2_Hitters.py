@@ -1745,7 +1745,7 @@ def generate_hitter_page(batter_df, batter_name, game_date, opponent,
     ax_spray = fig.add_subplot(gs[3, 2]); draw_spray_chart(ax_spray, bip)
 
     # Use nested gridspec for stacked BB profile + spray direction
-    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpecFromSubplotSpec
+    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
     gs_sub = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[3, 3], hspace=0.65)
     ax_bb   = fig.add_subplot(gs_sub[0]); draw_batted_ball_profile(ax_bb, stats)
     ax_pull = fig.add_subplot(gs_sub[1]); draw_pull_oppo(ax_pull, stats)
