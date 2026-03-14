@@ -1724,50 +1724,64 @@ def generate_hitter_page(batter_df, batter_name, game_date, opponent,
 
     filter_suffix = f" ({', '.join(filter_labels)})" if filter_labels else ""
 
-    fig = plt.figure(figsize=(24, 20), facecolor=BG_COLOR)
-    gs  = fig.add_gridspec(4, 4,
-                            height_ratios=[0.08, 0.13, 1.0, 1.0],
-                            hspace=0.52, wspace=0.38,
-                            left=0.04, right=0.97, top=0.96, bottom=0.04)
+    # ── 3-column layout: removes spray chart, makes everything bigger ──
+    # Row 0: title bar (full width)
+    # Row 1: stats banner (full width)
+    # Row 2: EV scatter | EV distribution | Zone EV  | Zone xwOBA
+    #         (spans 2 cols)               (spans 1)   (spans 1)
+    # Row 3: Swing rate | Whiff%  | BB profile | Spray direction
+    #         (spans 1)   (spans 1)  (spans 1)    (spans 1)
+    # Actually use 3 cols for row 2/3 with wider charts
+
+    # Layout: 5 rows x 3 cols
+    # Row 0: title (full)
+    # Row 1: stats banner (full)
+    # Row 2: EV scatter | EV distribution | Zone EV heatmap
+    # Row 3: Zone xwOBA  | Swing rate     | Whiff%
+    # Row 4: BB profile  | Spray direction | (empty)
+
+    fig = plt.figure(figsize=(24, 26), facecolor=BG_COLOR)
+    gs  = fig.add_gridspec(5, 3,
+                            height_ratios=[0.06, 0.10, 1.0, 1.0, 0.55],
+                            hspace=0.45, wspace=0.35,
+                            left=0.05, right=0.97, top=0.97, bottom=0.03)
 
     # ── Title bar ──
     ax_title = fig.add_subplot(gs[0, :])
     ax_title.set_facecolor(BG_COLOR); ax_title.axis("off")
-    ax_title.text(0.01, 0.65, batter_name,
-                  transform=ax_title.transAxes, fontsize=32, fontweight="bold",
+    ax_title.text(0.01, 0.70, batter_name,
+                  transform=ax_title.transAxes, fontsize=34, fontweight="bold",
                   color=TEXT_COLOR, va="center")
     side     = batter_df["BatterSide"].mode()[0] if not batter_df["BatterSide"].empty else "?"
     hand_lbl = "LHB" if side == "Left" else "RHB" if side == "Right" else side
     info     = f"{game_date}  ·  vs {opponent}  ·  {hand_lbl}  ·  {stats['pa']} PA  ·  {stats['bip']} BIP"
     if filter_suffix:
         info += f"  ·  Heatmaps filtered{filter_suffix}"
-    ax_title.text(0.01, 0.12, info, transform=ax_title.transAxes,
-                  fontsize=13, color=MUTED_TEXT, va="center")
+    ax_title.text(0.01, 0.15, info, transform=ax_title.transAxes,
+                  fontsize=14, color=MUTED_TEXT, va="center")
 
-    # ── Stats banner (always uses full unfiltered data) ──
+    # ── Stats banner ──
     ax_banner = fig.add_subplot(gs[1, :])
     draw_hitter_stats_banner(ax_banner, stats, batter_name)
 
-    # ── Row 2: Contact quality + zone heatmaps ──
+    # ── Row 2: Contact quality + zone EV ──
     ax_scatter = fig.add_subplot(gs[2, 0]); draw_ev_la_scatter(ax_scatter, bip)
     ax_evdist  = fig.add_subplot(gs[2, 1]); draw_ev_distribution(ax_evdist, bip)
     ax_zone_ev = fig.add_subplot(gs[2, 2])
     draw_zone_heatmap(ax_zone_ev, batter_df, "ev", f"Zone EV{filter_suffix}", heat_df)
-    ax_zone_xw = fig.add_subplot(gs[2, 3])
+
+    # ── Row 3: Zone xwOBA | Swing rate | Whiff% ──
+    ax_zone_xw = fig.add_subplot(gs[3, 0])
     draw_zone_heatmap(ax_zone_xw, batter_df, "xwoba", f"Zone xwOBA{filter_suffix}", heat_df)
-
-    # ── Row 3: Swing decisions + spray/batted ball ──
-    ax_swing = fig.add_subplot(gs[3, 0])
+    ax_swing = fig.add_subplot(gs[3, 1])
     draw_zone_heatmap(ax_swing, batter_df, "swing", f"Swing Rate{filter_suffix}", heat_df)
-    ax_whiff = fig.add_subplot(gs[3, 1])
+    ax_whiff = fig.add_subplot(gs[3, 2])
     draw_zone_heatmap(ax_whiff, batter_df, "whiff", f"Whiff%{filter_suffix}", heat_df)
-    ax_spray = fig.add_subplot(gs[3, 2]); draw_spray_chart(ax_spray, bip)
 
-    # Use nested gridspec for stacked BB profile + spray direction
-    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
-    gs_sub = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[3, 3], hspace=0.65)
-    ax_bb   = fig.add_subplot(gs_sub[0]); draw_batted_ball_profile(ax_bb, stats)
-    ax_pull = fig.add_subplot(gs_sub[1]); draw_pull_oppo(ax_pull, stats)
+    # ── Row 4: Batted ball profile | Spray direction | blank ──
+    ax_bb   = fig.add_subplot(gs[4, 0]); draw_batted_ball_profile(ax_bb, stats)
+    ax_pull = fig.add_subplot(gs[4, 1]); draw_pull_oppo(ax_pull, stats)
+    ax_blank = fig.add_subplot(gs[4, 2]); ax_blank.axis("off")
 
     return fig
 
