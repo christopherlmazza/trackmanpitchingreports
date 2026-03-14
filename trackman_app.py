@@ -69,8 +69,12 @@ GRADE_CMAP = LinearSegmentedColormap.from_list("grade", [
 
 @st.cache_data(ttl=3600)
 def load_percentiles():
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base = os.getcwd()
     paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "D1_percentiles.json"),
+        os.path.join(base, "D1_percentiles.json"),
         os.path.join(os.path.expanduser("~"), "Downloads", "D1_percentiles.json"),
         "D1_percentiles.json",
     ]
@@ -1018,8 +1022,12 @@ def parse_session_date(session, fallback_date):
 
 # ── Hitter percentiles ────────────────────────────────────────────────────────
 def load_hitter_percentiles():
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base = os.getcwd()
     paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "D1_hitter_percentiles.json"),
+        os.path.join(base, "D1_hitter_percentiles.json"),
         os.path.join(os.path.expanduser("~"), "Downloads", "D1_hitter_percentiles.json"),
         "D1_hitter_percentiles.json",
     ]
@@ -1149,12 +1157,13 @@ def compute_batter_stats(df):
 
 # ── Drawing helpers ───────────────────────────────────────────────────────────
 def _hax(ax):
-    ax.set_facecolor(PANEL_COLOR)
-    for sp in ax.spines.values(): sp.set_color(GRID_COLOR)
-    ax.tick_params(colors=MUTED_TEXT, labelsize=7)
-    ax.xaxis.label.set_color(MUTED_TEXT)
-    ax.yaxis.label.set_color(MUTED_TEXT)
+    ax.set_facecolor("#FFFFFF")
+    for sp in ax.spines.values(): sp.set_color("#CCCCCC")
+    ax.tick_params(colors=TEXT_COLOR, labelsize=7)
+    ax.xaxis.label.set_color(TEXT_COLOR)
+    ax.yaxis.label.set_color(TEXT_COLOR)
     ax.title.set_color(TEXT_COLOR)
+    ax.grid(False)
 
 def draw_ev_la_scatter(ax, bip):
     """EV vs Launch Angle scatter coloured by xwOBA."""
@@ -1165,9 +1174,9 @@ def draw_ev_la_scatter(ax, bip):
     _hax(ax)
     sc = ax.scatter(bip["LaunchAngle"], bip["ExitSpeed"],
                     c=bip["xwOBA_val"].clip(0, 1.5), cmap="RdYlGn",
-                    vmin=0, vmax=1.5, s=35, alpha=0.85, edgecolors="white", linewidths=0.3)
-    ax.axvspan(8, 32, color=ACCENT_COLOR, alpha=0.08)
-    ax.axhline(95, color="#FF6666", lw=0.8, ls="--", alpha=0.5)
+                    vmin=0, vmax=1.5, s=40, alpha=0.9, edgecolors="#333333", linewidths=0.5)
+    ax.axvspan(8, 32, color=ACCENT_COLOR, alpha=0.06, label="Sweet spot")
+    ax.axhline(95, color="#CC3333", lw=0.8, ls="--", alpha=0.6)
     ax.set_xlabel("Launch Angle (°)", fontsize=7)
     ax.set_ylabel("Exit Velocity (mph)", fontsize=7)
     ax.set_title("EV vs Launch Angle", fontsize=9, fontweight="bold", color=TEXT_COLOR)
@@ -1184,13 +1193,14 @@ def draw_ev_distribution(ax, bip):
     _hax(ax)
     ev = bip["ExitSpeed"].dropna()
     n_bins = min(20, max(5, len(ev) // 2))
-    ax.hist(ev, bins=n_bins, color=ACCENT_COLOR, alpha=0.8, edgecolor=BG_COLOR, lw=0.5)
+    ax.hist(ev, bins=n_bins, color=ACCENT_COLOR, alpha=0.75, edgecolor="white", lw=0.8)
     ymax = ax.get_ylim()[1]
-    for p, col, lbl in [(50, "#FFFFFF", "Avg"), (90, "#FFD700", "90th")]:
+    for p, col, lbl in [(50, "#333333", "Avg"), (90, "#B8860B", "90th")]:
         val = np.percentile(ev, p)
-        ax.axvline(val, color=col, lw=1.5, ls="--")
+        ax.axvline(val, color=col, lw=2.0, ls="--")
         ax.text(val + 0.5, ymax * 0.88, f"{lbl}\n{val:.1f}", color=col,
-                fontsize=7, va="top", fontweight="bold")
+                fontsize=7, va="top", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=col, alpha=0.85, lw=0.8))
     ax.set_xlabel("Exit Velocity (mph)", fontsize=7)
     ax.set_ylabel("Count", fontsize=7)
     ax.set_title("EV Distribution", fontsize=9, fontweight="bold", color=TEXT_COLOR)
@@ -1266,17 +1276,20 @@ def draw_zone_heatmap(ax, df, stat="ev", title="EV Heatmap", filter_df=None):
                 fmt = f"{v:.0f}" if stat in ("ev", "whiff", "swing") else f"{v:.2f}"
                 # Pick text color for contrast against background
                 norm_v = (v - vmin) / max(vmax - vmin, 1)
-                txt_col = "black" if 0.35 < norm_v < 0.75 else "white"
+                # More aggressive contrast: dark text on light/mid cells, white on dark
+                txt_col = "black" if norm_v < 0.6 else "white"
                 ax.text(x_bins[j] + 0.25, y_bins[i] + 0.25, fmt,
-                        ha="center", va="center", fontsize=6.5,
-                        color=txt_col, fontweight="bold")
+                        ha="center", va="center", fontsize=7,
+                        color=txt_col, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.1", fc="none", ec="none"))
 
     ax.set_xlim(-1.5, 1.5); ax.set_ylim(1.0, 4.0)
     ax.set_xlabel("Plate Side (ft)", fontsize=7)
     ax.set_ylabel("Height (ft)", fontsize=7)
     ax.set_title(title, fontsize=9, fontweight="bold", color=TEXT_COLOR)
     cb = plt.colorbar(im, ax=ax, shrink=0.8)
-    cb.ax.yaxis.set_tick_params(color=MUTED_TEXT, labelsize=6)
+    cb.ax.yaxis.set_tick_params(color=TEXT_COLOR, labelsize=6)
+    plt.setp(plt.getp(cb.ax.axes, 'yticklabels'), color=TEXT_COLOR)
 
 def draw_swing_zones(ax, df):
     """Swing rate zone heatmap."""
@@ -1294,7 +1307,7 @@ def draw_spray_chart(ax, bip):
     x = dist * sin(angle_rad)  — horizontal spread
     y = dist * cos(angle_rad)  — depth into field
     """
-    ax.set_facecolor(PANEL_COLOR)
+    ax.set_facecolor("#F0F4F0")
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.set_xticks([]); ax.set_yticks([])
 
@@ -1316,21 +1329,21 @@ def draw_spray_chart(ax, bip):
     for sign in [-1, 1]:
         fx = sign * r_out * np.sin(np.radians(45))
         fy = r_out * np.cos(np.radians(45))
-        ax.plot([0, fx], [0, fy], color=GRID_COLOR, lw=0.8, zorder=1)
+        ax.plot([0, fx], [0, fy], color="#888888", lw=1.0, zorder=1)
 
     # Outfield arc
     theta = np.linspace(-np.radians(45), np.radians(45), 100)
-    ax.plot(r_out * np.sin(theta), r_out * np.cos(theta), color=GRID_COLOR, lw=1, zorder=1)
+    ax.plot(r_out * np.sin(theta), r_out * np.cos(theta), color="#888888", lw=1.2, zorder=1)
 
     # Infield arc
     r_in = 95
     ax.plot(r_in * np.sin(theta), r_in * np.cos(theta),
-            color=GRID_COLOR, lw=0.5, ls="--", zorder=1)
+            color="#AAAAAA", lw=0.7, ls="--", zorder=1)
 
     # Bases: 3B left, 2B center, 1B right, home plate bottom
     base_coords = [(-63, 63), (0, 126), (63, 63), (0, 0)]
     for bx, by in base_coords:
-        ax.plot(bx, by, "s", color="#FFDD44", ms=5, zorder=4)
+        ax.plot(bx, by, "s", color="#CC9900", ms=6, zorder=4, markeredgecolor="#333333", markeredgewidth=0.5)
 
     # ── Plot BIPs ──
     valid = bip.dropna(subset=["spray_angle", "ExitSpeed"])
@@ -1374,10 +1387,10 @@ def draw_batted_ball_profile(ax, stats):
     labels = ["GB\n(<10°)", "LD\n(10-25°)", "FB\n(>25°)"]
     values = [stats.get("gb_pct") or 0, stats.get("ld_pct") or 0, stats.get("fb_pct") or 0]
     colors = ["#4488FF", "#44FF88", "#FF6644"]
-    bars = ax.bar(labels, values, color=colors, edgecolor=BG_COLOR, lw=0.5)
-    ax.bar_label(bars, fmt="%.1f%%", fontsize=8, color=TEXT_COLOR, padding=3)
+    bars = ax.bar(labels, values, color=colors, edgecolor="white", lw=0.8)
+    ax.bar_label(bars, fmt="%.1f%%", fontsize=8, color="#111111", padding=3, fontweight="bold")
     ax.set_ylim(0, max(max(values) * 1.35, 10))
-    ax.set_ylabel("%", fontsize=7)
+    ax.set_ylabel("%", fontsize=7, color="#111111")
     ax.set_title("Batted Ball Profile", fontsize=9, fontweight="bold", color=TEXT_COLOR)
 
 def draw_pull_oppo(ax, stats):
@@ -1385,11 +1398,11 @@ def draw_pull_oppo(ax, stats):
     _hax(ax)
     labels = ["Pull", "Center", "Oppo"]
     values = [stats.get("pull_pct") or 0, stats.get("center_pct") or 0, stats.get("oppo_pct") or 0]
-    colors = ["#FF4466", "#FFDD44", "#44AAFF"]
-    bars = ax.bar(labels, values, color=colors, edgecolor=BG_COLOR, lw=0.5)
-    ax.bar_label(bars, fmt="%.1f%%", fontsize=8, color=TEXT_COLOR, padding=3)
+    colors = ["#E84040", "#F0B800", "#3399EE"]
+    bars = ax.bar(labels, values, color=colors, edgecolor="white", lw=0.8)
+    ax.bar_label(bars, fmt="%.1f%%", fontsize=8, color="#111111", padding=3, fontweight="bold")
     ax.set_ylim(0, max(max(values) * 1.35, 10))
-    ax.set_ylabel("%", fontsize=7)
+    ax.set_ylabel("%", fontsize=7, color="#111111")
     ax.set_title("Spray Direction", fontsize=9, fontweight="bold", color=TEXT_COLOR)
 
 # ── Stats banner ──────────────────────────────────────────────────────────────
@@ -1399,15 +1412,16 @@ def draw_hitter_stats_banner(ax, stats, batter_name):
 
     def _bg(stat, val, hib):
         c = hitter_grade_color(stat, val, hib) if D1_HITTER_PCTLS else None
-        return c if c else (0.15, 0.15, 0.25, 1.0)
+        return c if c else (0.94, 0.94, 0.97, 1.0)
 
     def _text_color_for_bg(bg_rgba):
-        """Return black or white depending on background luminance."""
+        """Return black or white depending on background luminance — strict threshold."""
         if isinstance(bg_rgba, tuple) and len(bg_rgba) >= 3:
             r, g, b = bg_rgba[:3]
+            # Perceptual luminance
             lum = 0.299 * r + 0.587 * g + 0.114 * b
-            return "black" if lum > 0.55 else "white"
-        return "white"
+            return "#111111" if lum > 0.45 else "#FFFFFF"
+        return "#111111"
 
     metrics = [
         ("Avg EV",   stats.get("avg_ev"),          "ev90",          True,  ".1f", " mph"),
@@ -1433,8 +1447,8 @@ def draw_hitter_stats_banner(ax, stats, batter_name):
 
         if missing:
             disp   = "—"
-            bg     = (0.10, 0.10, 0.18, 1.0)
-            t_col  = "#666688"
+            bg     = (0.91, 0.91, 0.93, 1.0)
+            t_col  = "#888899"
             p_txt  = ""
         else:
             disp  = f"{val:{fmt}}{unit}"
@@ -1446,20 +1460,200 @@ def draw_hitter_stats_banner(ax, stats, batter_name):
         ax.add_patch(plt.Rectangle((i * col_w + 0.004, 0.05), col_w - 0.008, 0.90,
                                     transform=ax.transAxes, color=bg,
                                     clip_on=False, zorder=2))
-        # Label
+        # Label — slightly muted version of contrast color
+        label_col = t_col if missing else t_col
         ax.text(x, 0.76, label, transform=ax.transAxes,
                 ha="center", va="center", fontsize=7,
-                color=t_col if not missing else "#555577",
-                fontweight="bold", zorder=3)
-        # Value
-        ax.text(x, 0.42, disp, transform=ax.transAxes,
+                color=label_col, fontweight="bold", zorder=3, alpha=0.75)
+        # Value — full contrast
+        ax.text(x, 0.44, disp, transform=ax.transAxes,
                 ha="center", va="center", fontsize=11,
                 color=t_col, fontweight="bold", zorder=3)
         # Percentile
         if p_txt:
             ax.text(x, 0.13, p_txt, transform=ax.transAxes,
                     ha="center", va="center", fontsize=6.5,
-                    color=t_col, alpha=0.85, zorder=3)
+                    color=t_col, alpha=0.80, zorder=3)
+
+
+# ── Standalone hitter heatmap (mirrors pitcher generate_heatmap) ──────────────
+def generate_hitter_heatmap(batter_df, metric="ev", pitch_type=None,
+                             pitcher_hand=None, count=None):
+    """
+    Generate a KDE-smoothed heatmap for a hitter split by pitch location.
+    Mirrors the pitcher generate_heatmap style exactly.
+
+    metric: "ev" | "xwoba" | "whiff" | "swing" | "location"
+    All other args are filters applied before plotting.
+    """
+    SWING_CALLS = {"StrikeSwinging", "FoulBall", "FoulBallNotFieldable", "InPlay"}
+
+    df = batter_df.copy()
+
+    # ── Apply filters ──
+    if pitch_type:
+        df = df[df["PitchType"] == pitch_type]
+    if pitcher_hand:
+        df = df[df["PitcherThrows"] == pitcher_hand]
+    if count:
+        if count == "2-strike":
+            df = df[df["Strikes"] == 2]
+        elif count == "ahead":
+            df = df[df["Balls"] > df["Strikes"]]
+        elif count == "behind":
+            df = df[df["Strikes"] > df["Balls"]]
+        elif "-" in str(count):
+            try:
+                b, s = count.split("-")
+                df = df[(df["Balls"] == int(b)) & (df["Strikes"] == int(s))]
+            except Exception:
+                pass
+
+    df = df[df["PlateLocSide"].notna() & df["PlateLocHeight"].notna()]
+    if len(df) < 3:
+        return None
+
+    # ── Compute metric value per pitch ──
+    is_density_only = False
+
+    if metric == "location":
+        is_density_only = True
+        cmap_name  = "YlOrRd"
+        title_label = "Pitch Location Density"
+        vmin, vmax = 0, 1
+
+    elif metric == "ev":
+        bip = df[df["PitchCall"] == "InPlay"].copy()
+        bip = bip[bip["ExitSpeed"].notna()]
+        if len(bip) < 3: return None
+        df = bip
+        df["_val"] = df["ExitSpeed"]
+        cmap_name  = "RdYlGn"
+        title_label = "Exit Velocity (mph)"
+        vmin, vmax = 65, 105
+
+    elif metric == "xwoba":
+        df["xwOBA_val"] = df.apply(
+            lambda r: calc_xwoba(r["ExitSpeed"], r["LaunchAngle"])
+            if r["PitchCall"] == "InPlay" else (
+                0.0 if r["PitchCall"] == "StrikeSwinging" else
+                0.05 if r["PitchCall"] == "StrikeCalled" else np.nan), axis=1)
+        df = df[df["xwOBA_val"].notna()]
+        if len(df) < 3: return None
+        df["_val"] = df["xwOBA_val"]
+        cmap_name  = "RdYlGn"
+        title_label = "xwOBA"
+        vmin, vmax = 0.0, 1.2
+
+    elif metric == "whiff":
+        df["_val"] = (df["PitchCall"] == "StrikeSwinging").astype(float)
+        df = df[df["PitchCall"].isin(SWING_CALLS)]
+        if len(df) < 3: return None
+        cmap_name  = "RdYlGn_r"
+        title_label = "Whiff Rate"
+        vmin, vmax = 0, 0.6
+
+    elif metric == "swing":
+        df["_val"] = df["PitchCall"].isin(SWING_CALLS).astype(float)
+        cmap_name  = "RdYlGn"
+        title_label = "Swing Rate"
+        vmin, vmax = 0, 1.0
+
+    else:
+        return None
+
+    # ── Build title components ──
+    parts = []
+    if pitch_type:   parts.append(pitch_type)
+    if pitcher_hand: parts.append(f"vs {'LHP' if pitcher_hand=='L' else 'RHP'}")
+    if count:        parts.append(f"{count} count")
+    filter_str = " · ".join(parts)
+
+    batter_name = df["Batter"].iloc[0] if "Batter" in df.columns else "Batter"
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), facecolor=BG_COLOR)
+
+    for idx, (side, label) in enumerate([("Left", "vs LHP"), ("Right", "vs RHP")]):
+        ax = axes[idx]
+        ax.set_facecolor(PANEL_COLOR)
+
+        if pitcher_hand:
+            # If filtered to one hand just show that panel fully, grey out other
+            side_data = df if pitcher_hand == side[0] else df.iloc[0:0]
+            label = f"vs {'LHP' if pitcher_hand=='L' else 'RHP'}" if pitcher_hand == side[0] else label
+        else:
+            side_data = df[df["PitcherThrows"] == side] if "PitcherThrows" in df.columns else df
+
+        # Strike zone box
+        ax.add_patch(Rectangle((-0.95, 1.6), 1.9, 1.9,
+                                fill=False, ec="white", lw=1.5, zorder=10))
+        # Home plate
+        ax.add_patch(Polygon([(-.708,.15),(.708,.15),(.708,.35),(0,.55),(-.708,.35)],
+                             closed=True, fc="#CCCCCC", ec="black", lw=.5, alpha=0.5, zorder=10))
+
+        if len(side_data) >= 3:
+            x = side_data["PlateLocSide"].values
+            y = side_data["PlateLocHeight"].values
+            xi = np.linspace(-2.5, 2.5, 80)
+            yi = np.linspace(-0.5, 5.0, 80)
+            Xi, Yi = np.meshgrid(xi, yi)
+
+            try:
+                positions = np.vstack([x, y])
+                kde = gaussian_kde(positions, bw_method=0.4)
+                density = kde(np.vstack([Xi.ravel(), Yi.ravel()])).reshape(Xi.shape)
+
+                if is_density_only:
+                    Zi = density / density.max() if density.max() > 0 else density
+                    Zi[Zi < 0.05] = np.nan
+                else:
+                    vals = side_data["_val"].values
+                    Zi = np.zeros_like(Xi)
+                    W  = np.zeros_like(Xi)
+                    for px, py, pv in zip(x, y, vals):
+                        dist2   = (Xi - px)**2 + (Yi - py)**2
+                        weights = np.exp(-dist2 / (2 * 0.3**2))
+                        Zi += weights * pv
+                        W  += weights
+                    W[W == 0] = 1
+                    Zi = Zi / W
+                    density_thresh = density.max() * 0.05
+                    Zi[density < density_thresh] = np.nan
+
+                ax.pcolormesh(Xi, Yi, Zi, cmap=cmap_name,
+                              vmin=vmin, vmax=vmax,
+                              shading="gouraud", zorder=1)
+            except Exception:
+                pass
+
+            ax.scatter(x, y, c="black", s=8, alpha=0.4, zorder=6)
+
+        n_side = len(side_data)
+        ax.set_title(f"{label} (n={n_side})", fontsize=11,
+                     fontweight="bold", color=TEXT_COLOR, pad=8)
+        ax.set_xlim(-2.5, 2.5); ax.set_ylim(-0.5, 5.0)
+        ax.set_xlabel("Plate Side (ft)", fontsize=8, color=MUTED_TEXT)
+        if idx == 0:
+            ax.set_ylabel("Plate Height (ft)", fontsize=8, color=MUTED_TEXT)
+        ax.tick_params(labelsize=7, colors=MUTED_TEXT)
+        for sp in ax.spines.values(): sp.set_color(GRID_COLOR)
+
+    fig.subplots_adjust(right=0.88)
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+    sm = plt.cm.ScalarMappable(cmap=cmap_name,
+                                norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax)
+    cbar.set_label(title_label, fontsize=9, color=TEXT_COLOR)
+    cbar.ax.tick_params(labelsize=7, colors=MUTED_TEXT)
+
+    main_title = f"{title_label} Heatmap — {batter_name}"
+    if filter_str:
+        main_title += f"  [{filter_str}]"
+    fig.suptitle(main_title, fontsize=14, fontweight="bold",
+                 color=TEXT_COLOR, y=0.98)
+    fig.patch.set_facecolor(BG_COLOR)
+    return fig
 
 # ── Main hitter page generator ────────────────────────────────────────────────
 def generate_hitter_page(batter_df, batter_name, game_date, opponent,
@@ -3253,7 +3447,6 @@ if report_mode == "🏏 Hitters":
         st.warning(f"No batting data found for {team_name} between {date_from} and {date_to}")
         st.stop()
 
-    # Add xwOBA and spray columns
     bat_df["xwOBA"] = bat_df.apply(
         lambda r: calc_xwoba(r["ExitSpeed"], r["LaunchAngle"])
         if r["PitchCall"] == "InPlay" else np.nan, axis=1)
@@ -3266,16 +3459,14 @@ if report_mode == "🏏 Hitters":
     for _, row in games_h.iterrows():
         st.text(f"  📅 {row['GameDate']} — {row['HomeTeam']} vs {row['AwayTeam']}")
 
-    # Batter picker
+    # Batter + game pickers
     batter_list = get_batters(bat_df)
     if not batter_list:
-        st.warning("No batters found.")
-        st.stop()
+        st.warning("No batters found."); st.stop()
 
     selected_batter = st.selectbox("Select Batter", batter_list)
-
-    # Game picker for that batter
     b_df = bat_df[bat_df["Batter"] == selected_batter]
+
     batter_games = sorted(b_df.groupby(["GameDate","HomeTeam","AwayTeam"]).groups.keys())
     game_options = []
     for gdate, ht, at in batter_games:
@@ -3283,68 +3474,140 @@ if report_mode == "🏏 Hitters":
         game_options.append((f"{gdate} vs {opp}", gdate, opp))
 
     if not game_options:
-        st.warning("No games found for this batter.")
-        st.stop()
+        st.warning("No games found for this batter."); st.stop()
 
     if len(game_options) == 1:
-        selected_game_label, sel_gdate, sel_opp = game_options[0]
+        _, sel_gdate, sel_opp = game_options[0]
     else:
-        all_option = ("All games (season)", None, "Season")
-        game_options_with_all = [all_option] + game_options
-        labels = [g[0] for g in game_options_with_all]
-        sel_idx = st.selectbox("Select Game", range(len(labels)), format_func=lambda i: labels[i])
-        selected_game_label, sel_gdate, sel_opp = game_options_with_all[sel_idx]
+        all_opt = ("All games (season)", None, "Season")
+        all_game_opts = [all_opt] + game_options
+        all_labels = [g[0] for g in all_game_opts]
+        sel_idx = st.selectbox("Select Game", range(len(all_labels)),
+                               format_func=lambda i: all_labels[i])
+        _, sel_gdate, sel_opp = all_game_opts[sel_idx]
 
-    # Filter to selected game
     if sel_gdate is None:
-        page_df  = b_df
+        page_df   = b_df
         gdate_lbl = "Full Season"
         opp_lbl   = team_name
     else:
-        page_df  = b_df[b_df["GameDate"] == sel_gdate]
+        page_df   = b_df[b_df["GameDate"] == sel_gdate]
         gdate_lbl = str(sel_gdate)
         opp_lbl   = sel_opp
 
     if page_df.empty:
-        st.warning("No data for this selection.")
-        st.stop()
+        st.warning("No data for this selection."); st.stop()
 
-    # ── Heatmap filters ──
-    st.markdown("**Heatmap Filters** *(stats banner always shows full data)*")
-    hf_col1, hf_col2, hf_col3 = st.columns(3)
-    with hf_col1:
-        pitcher_hand_opts = ["All"] + sorted(
-            [h for h in page_df["PitcherThrows"].dropna().unique() if h])
-        sel_hand = st.selectbox("vs Pitcher Hand", pitcher_hand_opts, key="hf_hand")
-    with hf_col2:
-        pt_opts = ["All"] + sorted(
-            [p for p in page_df["PitchType"].dropna().unique() if p and p != "Other"])
-        sel_pt = st.selectbox("Pitch Type", pt_opts, key="hf_pt")
-    with hf_col3:
-        count_opts = ["All", "0-0", "1-0", "2-0", "3-0",
-                      "0-1", "1-1", "2-1", "3-1",
-                      "0-2", "1-2", "2-2", "3-2",
-                      "2-strike", "ahead", "behind"]
-        sel_count = st.selectbox("Count", count_opts, key="hf_count")
+    # ── Tabs ──
+    tab_card, tab_heatmaps = st.tabs(["📄 Hitter Card", "🔥 Heatmaps"])
 
-    f_hand  = None if sel_hand  == "All" else sel_hand
-    f_pt    = None if sel_pt    == "All" else sel_pt
-    f_count = None if sel_count == "All" else sel_count
+    with tab_card:
+        st.caption("Stats banner uses all data. Heatmaps on the card can be filtered below.")
+        cf1, cf2, cf3 = st.columns(3)
+        with cf1:
+            ph_opts = ["All"] + sorted([h for h in page_df["PitcherThrows"].dropna().unique() if h])
+            card_hand  = st.selectbox("vs Pitcher Hand", ph_opts, key="card_hand")
+        with cf2:
+            cpt_opts = ["All"] + sorted([p for p in page_df["PitchType"].dropna().unique()
+                                         if p and p != "Other"])
+            card_pt    = st.selectbox("Pitch Type", cpt_opts, key="card_pt")
+        with cf3:
+            cnt_opts = ["All","0-0","1-0","2-0","3-0","0-1","1-1","2-1","3-1",
+                        "0-2","1-2","2-2","3-2","2-strike","ahead","behind"]
+            card_count = st.selectbox("Count", cnt_opts, key="card_count")
 
-    if st.button("📄 Generate Hitter Card", use_container_width=True, type="primary"):
-        with st.spinner(f"Generating card for {selected_batter}..."):
-            try:
-                hfig = generate_hitter_page(
-                    page_df, selected_batter, gdate_lbl, opp_lbl,
-                    filter_count=f_count,
-                    filter_pitch_hand=f_hand,
-                    filter_pitch_type=f_pt,
-                )
-                st.pyplot(hfig)
-                plt.close(hfig)
-            except Exception as e:
-                st.error(f"Error generating hitter card: {e}")
-                import traceback; st.code(traceback.format_exc())
+        f_hand  = None if card_hand  == "All" else card_hand
+        f_pt    = None if card_pt    == "All" else card_pt
+        f_count = None if card_count == "All" else card_count
+
+        if st.button("📄 Generate Hitter Card", use_container_width=True,
+                     type="primary", key="btn_hitter_card"):
+            with st.spinner(f"Generating card for {selected_batter}..."):
+                try:
+                    hfig = generate_hitter_page(
+                        page_df, selected_batter, gdate_lbl, opp_lbl,
+                        filter_count=f_count,
+                        filter_pitch_hand=f_hand,
+                        filter_pitch_type=f_pt,
+                    )
+                    st.pyplot(hfig, use_container_width=True)
+                    buf = io.BytesIO()
+                    hfig.savefig(buf, format="png", bbox_inches="tight",
+                                 dpi=150, facecolor=BG_COLOR)
+                    buf.seek(0)
+                    st.download_button("📥 Download Card", data=buf,
+                                       file_name=f"HitterCard_{selected_batter}_{gdate_lbl}.png",
+                                       mime="image/png", use_container_width=True)
+                    plt.close(hfig)
+                except Exception as e:
+                    st.error(f"Error generating hitter card: {e}")
+                    import traceback; st.code(traceback.format_exc())
+
+    with tab_heatmaps:
+        st.caption("KDE-smoothed zone heatmaps — same style as pitcher heatmaps.")
+
+        # Filter controls
+        hm_col1, hm_col2, hm_col3 = st.columns(3)
+        with hm_col1:
+            hm_metric = st.selectbox(
+                "Metric",
+                ["Exit Velocity", "xwOBA", "Whiff Rate", "Swing Rate", "Location Density"],
+                key="hm_metric")
+        with hm_col2:
+            avail_pt = ["All"] + sorted([p for p in page_df["PitchType"].dropna().unique()
+                                          if p and p != "Other"])
+            hm_pt = st.selectbox("Pitch Type", avail_pt, key="hm_pt_hitter")
+        with hm_col3:
+            avail_hand = ["All"] + sorted([h for h in page_df["PitcherThrows"].dropna().unique() if h])
+            hm_hand = st.selectbox("vs Pitcher Hand", avail_hand, key="hm_hand_hitter")
+
+        hm_col4, hm_col5 = st.columns([1, 2])
+        with hm_col4:
+            hm_cnt_opts = ["All","0-0","1-0","2-0","3-0","0-1","1-1","2-1","3-1",
+                           "0-2","1-2","2-2","3-2","2-strike","ahead","behind"]
+            hm_count = st.selectbox("Count", hm_cnt_opts, key="hm_count_hitter")
+
+        metric_map = {
+            "Exit Velocity":    "ev",
+            "xwOBA":            "xwoba",
+            "Whiff Rate":       "whiff",
+            "Swing Rate":       "swing",
+            "Location Density": "location",
+        }
+
+        if st.button("🔥 Generate Heatmap", type="primary",
+                     use_container_width=True, key="btn_hitter_hm"):
+            with st.spinner(f"Generating {hm_metric} heatmap..."):
+                try:
+                    hmfig = generate_hitter_heatmap(
+                        page_df,
+                        metric      = metric_map[hm_metric],
+                        pitch_type  = None if hm_pt   == "All" else hm_pt,
+                        pitcher_hand= None if hm_hand == "All" else hm_hand,
+                        count       = None if hm_count== "All" else hm_count,
+                    )
+                    if hmfig:
+                        st.pyplot(hmfig, use_container_width=True)
+                        buf = io.BytesIO()
+                        hmfig.savefig(buf, format="png", bbox_inches="tight",
+                                      dpi=150, facecolor=BG_COLOR)
+                        buf.seek(0)
+                        st.session_state["_hitter_hm_bytes"] = buf.getvalue()
+                        st.session_state["_hitter_hm_label"] = (
+                            f"{hm_metric}_{selected_batter}_{gdate_lbl}")
+                        plt.close(hmfig)
+                    else:
+                        st.warning("Not enough data for this filter combination (need 3+ pitches).")
+                except Exception as e:
+                    st.error(f"Error generating heatmap: {e}")
+                    import traceback; st.code(traceback.format_exc())
+
+        if st.session_state.get("_hitter_hm_bytes"):
+            st.download_button(
+                "📥 Download Heatmap",
+                data=st.session_state["_hitter_hm_bytes"],
+                file_name=f"Heatmap_{st.session_state.get('_hitter_hm_label','hitter')}.png",
+                mime="image/png", use_container_width=True)
 
     st.stop()  # Don't render pitcher content when in hitter mode
 
